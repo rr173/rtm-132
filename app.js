@@ -802,7 +802,7 @@ const PixelFontEditor = (function() {
                 const newPixels = [];
                 for (let x = 0; x < glyph.width; x++) {
                     let row = '';
-                    for (let y = 0; y < glyph.height; y++) {
+                    for (let y = glyph.height - 1; y >= 0; y--) {
                         row += glyph.pixels[y][x];
                     }
                     newPixels.push(row);
@@ -1122,20 +1122,25 @@ const PixelFontEditor = (function() {
     function renderPlaybackPreview() {
         if (!state.playbackMode || !state.playbackGlyph) return;
 
-        const text = document.getElementById('preview-text').value;
-        const scale = previewState.scale;
-
         const font = getCurrentFont();
         const originalGlyph = font.glyphs[state.currentCodePoint];
-        const tempBackup = originalGlyph ? { ...originalGlyph, pixels: [...originalGlyph.pixels] } : null;
+        const tempBackup = originalGlyph ? {
+            width: originalGlyph.width,
+            height: originalGlyph.height,
+            pixels: [...originalGlyph.pixels]
+        } : null;
 
         if (originalGlyph) {
+            originalGlyph.width = state.playbackGlyph.width;
+            originalGlyph.height = state.playbackGlyph.height;
             originalGlyph.pixels = [...state.playbackGlyph.pixels];
         }
 
         renderPreview();
 
         if (originalGlyph && tempBackup) {
+            originalGlyph.width = tempBackup.width;
+            originalGlyph.height = tempBackup.height;
             originalGlyph.pixels = tempBackup.pixels;
         }
     }
