@@ -37,6 +37,71 @@ const PixelFontEditor = (function() {
         contextMenuCodePoint: null
     };
 
+    let effectsState = {
+        effects: [],
+        currentFrame: 0,
+        isPlaying: true,
+        fps: 12,
+        lastFrameTime: 0,
+        animationId: null,
+        draggedEffectId: null
+    };
+
+    const EFFECT_TYPES = {
+        shadow: {
+            name: '投影',
+            isDynamic: false,
+            defaultParams: {
+                offsetX: 2,
+                offsetY: 2,
+                color: '#000000',
+                opacity: 0.5
+            }
+        },
+        stroke: {
+            name: '描边',
+            isDynamic: false,
+            defaultParams: {
+                width: 1,
+                color: '#000000'
+            }
+        },
+        gradient: {
+            name: '渐变填色',
+            isDynamic: false,
+            defaultParams: {
+                direction: 'vertical',
+                startColor: '#6366f1',
+                endColor: '#ec4899'
+            }
+        },
+        wave: {
+            name: '波浪变形',
+            isDynamic: true,
+            defaultParams: {
+                amplitude: 2,
+                frequency: 0.3
+            }
+        },
+        typewriter: {
+            name: '逐字出现',
+            isDynamic: true,
+            defaultParams: {
+                speed: 3,
+                holdFrames: 12
+            }
+        },
+        neon: {
+            name: '霓虹闪烁',
+            isDynamic: true,
+            defaultParams: {
+                color1: '#6366f1',
+                color2: '#ec4899',
+                period: 24
+            }
+        }
+    };
+
     let canvas, ctx, previewCanvas, previewCtx, ligatureCanvas, ligatureCtx;
 
     function createEmptyGlyph(width, height) {
@@ -624,22 +689,52 @@ const PixelFontEditor = (function() {
         return result;
     }
 
-    function renderPreview() {
-        const text = document.getElementById('preview-text').value;
-        const scale = parseInt(document.getElementById('preview-scale').value);
-        const lineWidth = parseInt(document.getElementById('preview-linewidth').value);
-        const lineSpacing = parseInt(document.getElementById('preview-linespacing').value);
-        
+    function exportPNG() {
+        const link = document.createElement('a');
+        link.download = `${fontData.metadata.name || 'pixel-font'}.png`;
+        link.href = previewCanvas.toDataURL('image/png');
+        link.click();
+    }
+
+    function hexToRgb(hex) {
+        const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        return result ? {
+            r: parseInt(result[1], 16),
+            g: parseInt(result[2], 16),
+            b: parseInt(result[3], 16)
+        } : { r: 255, g: 255, b: 255 };
+    }
+
+    function rgbToHex(r, g, b) {
+        return '#' + [r, g, b].map(x => {
+            const hex = Math.round(Math.max(0, Math.min(255, x))).toString(16);
+            return hex.length === 1 ? '0' + hex : hex;
+        }).join('');
+    }
+
+    function lerpColor(color1, color2, t) {
+        const c1 = hexToRgb(color1);
+        const c2 = hexToRgb(color2);
+        return rgbToHex(
+            c1.r + (c2.r - c1.r) * t,
+            c1.g + (c2.g - c1.g) * t,
+            c1.b + (c2.b - c1.b) * t
+        );
+    }
+
+    function getTextLayout(text, scale) {
         const processed = processTextForRendering(text);
         const glyphHeight = fontData.metadata.glyphHeight;
         const defaultSpacing = fontData.metadata.defaultSpacing;
-        
+        const lineWidth = parseInt(document.getElementById('preview-linewidth').value);
+        const lineSpacing = parseInt(document.getElementById('preview-linespacing').value);
+
         const lines = [];
         let currentLine = [];
         let currentWidth = 0;
         let currentWord = [];
         let currentWordWidth = 0;
-        
+
         function flushWord() {
             if (currentWord.length > 0) {
                 if (currentWidth + currentWordWidth > lineWidth && currentLine.length > 0) {
@@ -653,15 +748,17 @@ const PixelFontEditor = (function() {
                 currentWordWidth = 0;
             }
         }
-        
+
         for (let i = 0; i < processed.length; i++) {
             const item = processed[i];
             let itemWidth;
-            
+            let glyph;
+
             if (item.type === 'ligature') {
+                glyph = item.glyph;
                 itemWidth = item.glyph.width + defaultSpacing;
             } else {
-                const glyph = item.glyph || createEmptyGlyph(fontData.metadata.glyphWidth, fontData.metadata.glyphHeight);
+                glyph = item.glyph || createEmptyGlyph(fontData.metadata.glyphWidth, fontData.metadata.glyphHeight);
                 let kerningOffset = 0;
                 if (i > 0 && processed[i-1].type === 'char') {
                     const prevChar = processed[i-1].char;
@@ -670,7 +767,7 @@ const PixelFontEditor = (function() {
                 }
                 itemWidth = glyph.width + defaultSpacing + kerningOffset;
             }
-            
+
             if (item.type === 'char' && (item.char === ' ' || item.char === '\n')) {
                 flushWord();
                 if (item.char === '\n') {
@@ -678,83 +775,882 @@ const PixelFontEditor = (function() {
                     currentLine = [];
                     currentWidth = 0;
                 } else {
-                    currentLine.push(item);
+                    currentLine.push({ ...item, glyph, width: itemWidth, x: currentWidth });
                     currentWidth += itemWidth;
                 }
             } else {
-                currentWord.push(item);
+                currentWord.push({ ...item, glyph, width: itemWidth, x: 0 });
                 currentWordWidth += itemWidth;
             }
         }
-        
+
         flushWord();
         if (currentLine.length > 0) {
             lines.push(currentLine);
         }
-        
-        const totalHeight = lines.length * (glyphHeight + lineSpacing) * scale;
-        const maxLineWidthPx = Math.max(...lines.map(line => {
-            let w = 0;
-            line.forEach((item, idx) => {
-                if (item.type === 'ligature') {
-                    w += item.glyph.width + defaultSpacing;
-                } else {
-                    const glyph = item.glyph || createEmptyGlyph(fontData.metadata.glyphWidth, fontData.metadata.glyphHeight);
-                    let kerningOffset = 0;
-                    if (idx > 0 && line[idx-1].type === 'char') {
-                        const prevChar = line[idx-1].char;
-                        const kerningKey = prevChar + item.char;
-                        kerningOffset = fontData.kerning[kerningKey] || 0;
-                    }
-                    w += glyph.width + defaultSpacing + kerningOffset;
-                }
-            });
-            return w * scale;
-        }), 100);
-        const maxAllowedWidthPx = lineWidth * scale;
-        const totalWidth = Math.max(maxLineWidthPx, maxAllowedWidthPx);
-        
-        previewCanvas.width = totalWidth;
-        previewCanvas.height = Math.max(totalHeight, 50);
-        
-        previewCtx.fillStyle = '#0f0f23';
-        previewCtx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
-        
+
+        const layoutLines = [];
         let y = 0;
         lines.forEach(line => {
             let x = 0;
-            line.forEach((item, idx) => {
-                if (item.type === 'ligature') {
-                    drawGlyphToCanvas(previewCtx, item.glyph, x, y, scale);
-                    x += (item.glyph.width + defaultSpacing) * scale;
-                } else {
-                    const glyph = item.glyph || createEmptyGlyph(fontData.metadata.glyphWidth, fontData.metadata.glyphHeight);
+            const layoutChars = [];
+            line.forEach(item => {
+                if (item.type === 'char') {
                     let kerningOffset = 0;
-                    if (idx > 0 && line[idx-1].type === 'char') {
-                        const prevChar = line[idx-1].char;
-                        const kerningKey = prevChar + item.char;
+                    if (layoutChars.length > 0 && line[layoutChars.length - 1].type === 'char') {
+                        const prevItem = line[layoutChars.length - 1];
+                        const kerningKey = prevItem.char + item.char;
                         kerningOffset = fontData.kerning[kerningKey] || 0;
                     }
                     x += kerningOffset * scale;
-                    
-                    if (!item.glyph) {
-                        previewCtx.fillStyle = '#ef4444';
-                        previewCtx.fillRect(x, y, glyph.width * scale, glyph.height * scale);
-                    } else {
-                        drawGlyphToCanvas(previewCtx, glyph, x, y, scale);
-                    }
-                    x += (glyph.width + defaultSpacing) * scale;
                 }
+                layoutChars.push({
+                    ...item,
+                    x: x,
+                    y: y,
+                    glyph: item.glyph
+                });
+                x += item.width * scale;
             });
+            layoutLines.push({ chars: layoutChars, y: y, width: x });
             y += (glyphHeight + lineSpacing) * scale;
+        });
+
+        return {
+            lines: layoutLines,
+            totalWidth: Math.max(...layoutLines.map(l => l.width), 100),
+            totalHeight: y
+        };
+    }
+
+    function drawGlyphWithColor(targetCtx, glyph, x, y, scale, color) {
+        const rgb = hexToRgb(color);
+        targetCtx.fillStyle = `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
+        for (let gy = 0; gy < glyph.height; gy++) {
+            for (let gx = 0; gx < glyph.width; gx++) {
+                if (getPixel(glyph, gx, gy)) {
+                    targetCtx.fillRect(
+                        x + gx * scale,
+                        y + gy * scale,
+                        scale,
+                        scale
+                    );
+                }
+            }
+        }
+    }
+
+    function drawGlyphWithOpacity(targetCtx, glyph, x, y, scale, color, opacity) {
+        const rgb = hexToRgb(color);
+        targetCtx.fillStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${opacity})`;
+        for (let gy = 0; gy < glyph.height; gy++) {
+            for (let gx = 0; gx < glyph.width; gx++) {
+                if (getPixel(glyph, gx, gy)) {
+                    targetCtx.fillRect(
+                        x + gx * scale,
+                        y + gy * scale,
+                        scale,
+                        scale
+                    );
+                }
+            }
+        }
+    }
+
+    function renderShadowEffect(ctx, layout, scale, params) {
+        const { offsetX, offsetY, color, opacity } = params;
+        layout.lines.forEach(line => {
+            line.chars.forEach(char => {
+                if (!char.glyph) return;
+                drawGlyphWithOpacity(
+                    ctx,
+                    char.glyph,
+                    char.x + offsetX * scale,
+                    char.y + offsetY * scale,
+                    scale,
+                    color,
+                    opacity
+                );
+            });
         });
     }
 
-    function exportPNG() {
+    function renderStrokeEffect(ctx, layout, scale, params) {
+        const { width, color } = params;
+        const directions = [];
+        for (let dy = -width; dy <= width; dy++) {
+            for (let dx = -width; dx <= width; dx++) {
+                if (dx !== 0 || dy !== 0) {
+                    directions.push({ dx, dy });
+                }
+            }
+        }
+
+        layout.lines.forEach(line => {
+            line.chars.forEach(char => {
+                if (!char.glyph) return;
+                directions.forEach(dir => {
+                    drawGlyphWithColor(
+                        ctx,
+                        char.glyph,
+                        char.x + dir.dx * scale,
+                        char.y + dir.dy * scale,
+                        scale,
+                        color
+                    );
+                });
+            });
+        });
+    }
+
+    function renderGradientEffect(ctx, layout, scale, params, charColors) {
+        const { direction, startColor, endColor } = params;
+
+        layout.lines.forEach((line, lineIdx) => {
+            line.chars.forEach((char, charIdx) => {
+                if (!char.glyph) return;
+                const glyph = char.glyph;
+
+                for (let gy = 0; gy < glyph.height; gy++) {
+                    for (let gx = 0; gx < glyph.width; gx++) {
+                        if (getPixel(glyph, gx, gy)) {
+                            let t;
+                            if (direction === 'vertical') {
+                                t = glyph.height > 1 ? gy / (glyph.height - 1) : 0;
+                            } else {
+                                t = glyph.width > 1 ? gx / (glyph.width - 1) : 0;
+                            }
+                            const color = lerpColor(startColor, endColor, t);
+                            charColors[lineIdx][charIdx][gy][gx] = color;
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    function applyWaveEffect(layout, scale, params, frame) {
+        const { amplitude, frequency } = params;
+        let charIndex = 0;
+
+        layout.lines.forEach(line => {
+            line.chars.forEach(char => {
+                const offset = amplitude * scale * Math.sin(charIndex * frequency + (frame * Math.PI * 2) / 60);
+                char.yOffset = offset;
+                charIndex++;
+            });
+        });
+    }
+
+    function applyTypewriterEffect(layout, scale, params, frame, visibleChars) {
+        const { speed, holdFrames } = params;
+        let totalChars = 0;
+        layout.lines.forEach(line => {
+            totalChars += line.chars.length;
+        });
+
+        const cycleLength = totalChars * speed + holdFrames;
+        const frameInCycle = frame % cycleLength;
+        const charsToShow = Math.min(totalChars, Math.floor(frameInCycle / speed));
+
+        let charIndex = 0;
+        layout.lines.forEach((line, lineIdx) => {
+            line.chars.forEach((char, charIdx) => {
+                visibleChars[lineIdx][charIdx] = charIndex < charsToShow;
+                charIndex++;
+            });
+        });
+    }
+
+    function applyNeonEffect(layout, scale, params, frame, charColors) {
+        const { color1, color2, period } = params;
+        let charIndex = 0;
+
+        layout.lines.forEach((line, lineIdx) => {
+            line.chars.forEach((char, charIdx) => {
+                if (!char.glyph) return;
+                const phaseOffset = (charIndex * Math.PI * 2) / 8;
+                const t = (Math.sin((frame * Math.PI * 2) / period + phaseOffset) + 1) / 2;
+                const color = lerpColor(color1, color2, t);
+
+                const glyph = char.glyph;
+                for (let gy = 0; gy < glyph.height; gy++) {
+                    for (let gx = 0; gx < glyph.width; gx++) {
+                        if (getPixel(glyph, gx, gy)) {
+                            charColors[lineIdx][charIdx][gy][gx] = color;
+                        }
+                    }
+                }
+                charIndex++;
+            });
+        });
+    }
+
+    function hasDynamicEffects() {
+        return effectsState.effects.some(e => e.enabled && EFFECT_TYPES[e.type].isDynamic);
+    }
+
+    function getAnimationCycleFrames(layout) {
+        const dynamicEffects = effectsState.effects.filter(e => e.enabled && EFFECT_TYPES[e.type].isDynamic);
+        if (dynamicEffects.length === 0) return 1;
+
+        const periods = [];
+        let totalChars = 0;
+        layout.lines.forEach(line => {
+            totalChars += line.chars.length;
+        });
+
+        dynamicEffects.forEach(effect => {
+            if (effect.type === 'wave') {
+                periods.push(60);
+            } else if (effect.type === 'neon') {
+                periods.push(effect.params.period);
+            } else if (effect.type === 'typewriter') {
+                const { speed, holdFrames } = effect.params;
+                periods.push(totalChars * speed + holdFrames);
+            }
+        });
+
+        function gcd(a, b) {
+            return b === 0 ? a : gcd(b, a % b);
+        }
+
+        function lcm(a, b) {
+            return (a * b) / gcd(a, b);
+        }
+
+        return periods.reduce((acc, p) => lcm(acc, p), 1);
+    }
+
+    function initCharColors(layout) {
+        return layout.lines.map(line =>
+            line.chars.map(char => {
+                if (!char.glyph) return [];
+                return Array.from({ length: char.glyph.height }, () =>
+                    Array.from({ length: char.glyph.width }, () => '#ffffff')
+                );
+            })
+        );
+    }
+
+    function initVisibleChars(layout) {
+        return layout.lines.map(line =>
+            line.chars.map(() => true)
+        );
+    }
+
+    function renderFrame(targetCtx, frame, text, scale, targetWidth, targetHeight) {
+        const layout = getTextLayout(text, scale);
+        const charColors = initCharColors(layout);
+        const visibleChars = initVisibleChars(layout);
+
+        layout.lines.forEach(line => {
+            line.chars.forEach(char => {
+                char.yOffset = 0;
+            });
+        });
+
+        const enabledEffects = effectsState.effects.filter(e => e.enabled);
+
+        enabledEffects.forEach(effect => {
+            if (effect.type === 'wave') {
+                applyWaveEffect(layout, scale, effect.params, frame);
+            } else if (effect.type === 'typewriter') {
+                applyTypewriterEffect(layout, scale, effect.params, frame, visibleChars);
+            }
+        });
+
+        targetCtx.fillStyle = '#0f0f23';
+        targetCtx.fillRect(0, 0, targetWidth, targetHeight);
+
+        enabledEffects.forEach(effect => {
+            if (effect.type === 'shadow') {
+                renderShadowEffect(targetCtx, layout, scale, effect.params);
+            } else if (effect.type === 'stroke') {
+                renderStrokeEffect(targetCtx, layout, scale, effect.params);
+            }
+        });
+
+        enabledEffects.forEach(effect => {
+            if (effect.type === 'gradient') {
+                renderGradientEffect(targetCtx, layout, scale, effect.params, charColors);
+            } else if (effect.type === 'neon') {
+                applyNeonEffect(layout, scale, effect.params, frame, charColors);
+            }
+        });
+
+        layout.lines.forEach((line, lineIdx) => {
+            line.chars.forEach((char, charIdx) => {
+                if (!char.glyph || !visibleChars[lineIdx][charIdx]) return;
+                const glyph = char.glyph;
+                const y = char.y + (char.yOffset || 0);
+
+                for (let gy = 0; gy < glyph.height; gy++) {
+                    for (let gx = 0; gx < glyph.width; gx++) {
+                        if (getPixel(glyph, gx, gy)) {
+                            const color = charColors[lineIdx][charIdx][gy][gx] || '#ffffff';
+                            const rgb = hexToRgb(color);
+                            targetCtx.fillStyle = `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
+                            targetCtx.fillRect(
+                                char.x + gx * scale,
+                                y + gy * scale,
+                                scale,
+                                scale
+                            );
+                        }
+                    }
+                }
+            });
+        });
+
+        return layout;
+    }
+
+    function renderPreview() {
+        const text = document.getElementById('preview-text').value;
+        const scale = parseInt(document.getElementById('preview-scale').value);
+
+        const layout = getTextLayout(text, scale);
+        const padding = 20;
+        const maxEffectOffset = 10;
+        const totalWidth = Math.max(layout.totalWidth + padding * 2, 100);
+        const totalHeight = Math.max(layout.totalHeight + padding * 2 + maxEffectOffset * 2, 50);
+
+        previewCanvas.width = totalWidth;
+        previewCanvas.height = totalHeight;
+
+        previewCtx.save();
+        previewCtx.translate(padding, padding + maxEffectOffset);
+
+        renderFrame(previewCtx, effectsState.currentFrame, text, scale, totalWidth, totalHeight);
+
+        previewCtx.restore();
+
+        document.getElementById('frame-display').textContent = `帧: ${effectsState.currentFrame}`;
+    }
+
+    function addEffect(type) {
+        if (!EFFECT_TYPES[type]) return;
+
+        const effect = {
+            id: Date.now() + Math.random(),
+            type: type,
+            enabled: true,
+            params: { ...EFFECT_TYPES[type].defaultParams }
+        };
+
+        effectsState.effects.push(effect);
+        renderEffectsPanel();
+        resetAnimation();
+    }
+
+    function removeEffect(id) {
+        effectsState.effects = effectsState.effects.filter(e => e.id !== id);
+        renderEffectsPanel();
+        resetAnimation();
+    }
+
+    function toggleEffect(id) {
+        const effect = effectsState.effects.find(e => e.id === id);
+        if (effect) {
+            effect.enabled = !effect.enabled;
+            renderEffectsPanel();
+            resetAnimation();
+        }
+    }
+
+    function updateEffectParam(id, paramName, value) {
+        const effect = effectsState.effects.find(e => e.id === id);
+        if (effect) {
+            effect.params[paramName] = value;
+            renderPreview();
+        }
+    }
+
+    function reorderEffects(fromIndex, toIndex) {
+        if (fromIndex < 0 || fromIndex >= effectsState.effects.length) return;
+        if (toIndex < 0 || toIndex >= effectsState.effects.length) return;
+
+        const [removed] = effectsState.effects.splice(fromIndex, 1);
+        effectsState.effects.splice(toIndex, 0, removed);
+        renderEffectsPanel();
+        resetAnimation();
+    }
+
+    function renderEffectsPanel() {
+        const container = document.getElementById('effects-list');
+        container.innerHTML = '';
+
+        effectsState.effects.forEach((effect, index) => {
+            const effectType = EFFECT_TYPES[effect.type];
+            const item = document.createElement('div');
+            item.className = 'effect-item';
+            item.dataset.index = index;
+            item.draggable = true;
+
+            let paramsHtml = '';
+            Object.keys(effect.params).forEach(paramName => {
+                const value = effect.params[paramName];
+                let inputHtml = '';
+
+                if (paramName.includes('color') || paramName === 'color') {
+                    inputHtml = `<input type="color" value="${value}" data-param="${paramName}">`;
+                } else if (paramName === 'opacity') {
+                    inputHtml = `
+                        <input type="range" min="0" max="1" step="0.1" value="${value}" data-param="${paramName}">
+                        <span style="font-size:10px;color:var(--text-muted)">${value}</span>
+                    `;
+                } else if (paramName === 'direction') {
+                    inputHtml = `
+                        <select data-param="${paramName}">
+                            <option value="vertical" ${value === 'vertical' ? 'selected' : ''}>垂直</option>
+                            <option value="horizontal" ${value === 'horizontal' ? 'selected' : ''}>水平</option>
+                        </select>
+                    `;
+                } else if (paramName === 'offsetX' || paramName === 'offsetY') {
+                    inputHtml = `
+                        <input type="number" min="1" max="4" step="1" value="${value}" data-param="${paramName}">
+                    `;
+                } else if (paramName === 'width') {
+                    inputHtml = `
+                        <input type="number" min="1" max="2" step="1" value="${value}" data-param="${paramName}">
+                    `;
+                } else if (paramName === 'amplitude') {
+                    inputHtml = `
+                        <input type="number" min="0" max="10" step="0.5" value="${value}" data-param="${paramName}">
+                    `;
+                } else if (paramName === 'frequency') {
+                    inputHtml = `
+                        <input type="number" min="0.1" max="2" step="0.1" value="${value}" data-param="${paramName}">
+                    `;
+                } else if (paramName === 'speed') {
+                    inputHtml = `
+                        <input type="number" min="1" max="10" step="1" value="${value}" data-param="${paramName}">
+                    `;
+                } else if (paramName === 'holdFrames' || paramName === 'period') {
+                    inputHtml = `
+                        <input type="number" min="1" max="120" step="1" value="${value}" data-param="${paramName}">
+                    `;
+                } else {
+                    inputHtml = `<input type="number" value="${value}" data-param="${paramName}">`;
+                }
+
+                const labelMap = {
+                    offsetX: 'X偏移',
+                    offsetY: 'Y偏移',
+                    color: '颜色',
+                    color1: '颜色1',
+                    color2: '颜色2',
+                    opacity: '透明度',
+                    width: '宽度',
+                    direction: '方向',
+                    startColor: '起始色',
+                    endColor: '结束色',
+                    amplitude: '振幅',
+                    frequency: '频率',
+                    speed: '速度',
+                    holdFrames: '停留帧',
+                    period: '周期'
+                };
+
+                paramsHtml += `
+                    <div class="effect-param">
+                        <label>${labelMap[paramName] || paramName}</label>
+                        ${inputHtml}
+                    </div>
+                `;
+            });
+
+            item.innerHTML = `
+                <div class="effect-header">
+                    <span class="effect-drag-handle">⋮⋮</span>
+                    <span class="effect-name">${effectType.name}${effectType.isDynamic ? ' ⚡' : ''}</span>
+                    <div class="effect-toggle ${effect.enabled ? 'active' : ''}" data-toggle></div>
+                    <button class="effect-delete" data-delete>×</button>
+                </div>
+                <div class="effect-params">
+                    ${paramsHtml}
+                </div>
+            `;
+
+            item.addEventListener('dragstart', (e) => {
+                effectsState.draggedEffectId = effect.id;
+                item.classList.add('dragging');
+                e.dataTransfer.effectAllowed = 'move';
+            });
+
+            item.addEventListener('dragend', () => {
+                item.classList.remove('dragging');
+                effectsState.draggedEffectId = null;
+                document.querySelectorAll('.effect-item').forEach(el => {
+                    el.classList.remove('drag-over');
+                });
+            });
+
+            item.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                if (effectsState.draggedEffectId !== effect.id) {
+                    item.classList.add('drag-over');
+                }
+            });
+
+            item.addEventListener('dragleave', () => {
+                item.classList.remove('drag-over');
+            });
+
+            item.addEventListener('drop', (e) => {
+                e.preventDefault();
+                item.classList.remove('drag-over');
+                if (effectsState.draggedEffectId !== null && effectsState.draggedEffectId !== effect.id) {
+                    const fromIndex = effectsState.effects.findIndex(e => e.id === effectsState.draggedEffectId);
+                    const toIndex = parseInt(item.dataset.index);
+                    reorderEffects(fromIndex, toIndex);
+                }
+            });
+
+            item.querySelector('[data-toggle]').addEventListener('click', () => {
+                toggleEffect(effect.id);
+            });
+
+            item.querySelector('[data-delete]').addEventListener('click', () => {
+                removeEffect(effect.id);
+            });
+
+            item.querySelectorAll('[data-param]').forEach(input => {
+                const paramName = input.dataset.param;
+                input.addEventListener('input', (e) => {
+                    let value = e.target.value;
+                    if (input.type === 'number' || input.type === 'range') {
+                        value = parseFloat(value);
+                    }
+                    updateEffectParam(effect.id, paramName, value);
+                });
+            });
+
+            container.appendChild(item);
+        });
+    }
+
+    function resetAnimation() {
+        effectsState.currentFrame = 0;
+        if (!hasDynamicEffects()) {
+            stopAnimation();
+            renderPreview();
+        } else {
+            startAnimation();
+        }
+    }
+
+    function startAnimation() {
+        if (effectsState.animationId) {
+            cancelAnimationFrame(effectsState.animationId);
+        }
+        effectsState.lastFrameTime = 0;
+        animate();
+    }
+
+    function stopAnimation() {
+        if (effectsState.animationId) {
+            cancelAnimationFrame(effectsState.animationId);
+            effectsState.animationId = null;
+        }
+    }
+
+    function animate(timestamp) {
+        if (!effectsState.isPlaying || !hasDynamicEffects()) {
+            effectsState.animationId = requestAnimationFrame(animate);
+            return;
+        }
+
+        if (!effectsState.lastFrameTime) {
+            effectsState.lastFrameTime = timestamp;
+        }
+
+        const frameInterval = 1000 / effectsState.fps;
+        const elapsed = timestamp - effectsState.lastFrameTime;
+
+        if (elapsed >= frameInterval) {
+            effectsState.currentFrame++;
+            effectsState.lastFrameTime = timestamp - (elapsed % frameInterval);
+            renderPreview();
+        }
+
+        effectsState.animationId = requestAnimationFrame(animate);
+    }
+
+    function togglePlayPause() {
+        effectsState.isPlaying = !effectsState.isPlaying;
+        const btn = document.getElementById('btn-play-pause');
+        btn.textContent = effectsState.isPlaying ? '⏸ 暂停' : '▶ 播放';
+    }
+
+    class GIFEncoder {
+        constructor(width, height) {
+            this.width = width;
+            this.height = height;
+            this.frames = [];
+            this.colors = [];
+            this.colorMap = new Map();
+            this.delay = 10;
+        }
+
+        addFrame(imageData, delay) {
+            this.frames.push({ imageData, delay: delay || this.delay });
+            this.extractColors(imageData);
+        }
+
+        extractColors(imageData) {
+            for (let i = 0; i < imageData.data.length; i += 4) {
+                const r = imageData.data[i];
+                const g = imageData.data[i + 1];
+                const b = imageData.data[i + 2];
+                const key = `${r},${g},${b}`;
+                if (!this.colorMap.has(key)) {
+                    if (this.colors.length < 256) {
+                        this.colorMap.set(key, this.colors.length);
+                        this.colors.push({ r, g, b });
+                    }
+                }
+            }
+        }
+
+        getColorIndex(r, g, b) {
+            const key = `${r},${g},${b}`;
+            if (this.colorMap.has(key)) {
+                return this.colorMap.get(key);
+            }
+            let minDist = Infinity;
+            let closest = 0;
+            for (let i = 0; i < this.colors.length; i++) {
+                const c = this.colors[i];
+                const dist = (c.r - r) ** 2 + (c.g - g) ** 2 + (c.b - b) ** 2;
+                if (dist < minDist) {
+                    minDist = dist;
+                    closest = i;
+                }
+            }
+            return closest;
+        }
+
+        writeWord(value) {
+            return [value & 0xff, (value >> 8) & 0xff];
+        }
+
+        writeString(str) {
+            const bytes = [];
+            for (let i = 0; i < str.length; i++) {
+                bytes.push(str.charCodeAt(i));
+            }
+            return bytes;
+        }
+
+        encodePalette() {
+            const bytes = [];
+            const paletteSize = 256;
+            for (let i = 0; i < paletteSize; i++) {
+                if (i < this.colors.length) {
+                    bytes.push(this.colors[i].r);
+                    bytes.push(this.colors[i].g);
+                    bytes.push(this.colors[i].b);
+                } else {
+                    bytes.push(0, 0, 0);
+                }
+            }
+            return bytes;
+        }
+
+        lzwCompress(indices, minCodeSize) {
+            const clearCode = 1 << minCodeSize;
+            const eoiCode = clearCode + 1;
+            let codeSize = minCodeSize + 1;
+            let nextCode = eoiCode + 1;
+
+            const dict = new Map();
+            for (let i = 0; i < clearCode; i++) {
+                dict.set(String(i), i);
+            }
+
+            const output = [];
+            let current = String(indices[0]);
+
+            function writeCode(code, size, buffer, bufferPos) {
+                for (let i = 0; i < size; i++) {
+                    buffer[bufferPos >> 3] |= ((code >> i) & 1) << (bufferPos & 7);
+                    bufferPos++;
+                }
+                return bufferPos;
+            }
+
+            let buffer = new Uint8Array(Math.ceil(indices.length * 2));
+            let bufferPos = 0;
+
+            bufferPos = writeCode(clearCode, codeSize, buffer, bufferPos);
+
+            for (let i = 1; i < indices.length; i++) {
+                const key = current + ',' + indices[i];
+                if (dict.has(key)) {
+                    current = key;
+                } else {
+                    bufferPos = writeCode(dict.get(current), codeSize, buffer, bufferPos);
+                    if (nextCode < 4096) {
+                        dict.set(key, nextCode++);
+                        if (nextCode > (1 << codeSize) && codeSize < 12) {
+                            codeSize++;
+                        }
+                    } else {
+                        bufferPos = writeCode(clearCode, codeSize, buffer, bufferPos);
+                        dict.clear();
+                        for (let j = 0; j < clearCode; j++) {
+                            dict.set(String(j), j);
+                        }
+                        codeSize = minCodeSize + 1;
+                        nextCode = eoiCode + 1;
+                    }
+                    current = String(indices[i]);
+                }
+            }
+
+            bufferPos = writeCode(dict.get(current), codeSize, buffer, bufferPos);
+            bufferPos = writeCode(eoiCode, codeSize, buffer, bufferPos);
+
+            const byteCount = Math.ceil(bufferPos / 8);
+            return buffer.slice(0, byteCount);
+        }
+
+        encode() {
+            const bytes = [];
+
+            bytes.push(...this.writeString('GIF89a'));
+            bytes.push(...this.writeWord(this.width));
+            bytes.push(...this.writeWord(this.height));
+
+            const colorResolution = 7;
+            const sortFlag = 0;
+            const sizeOfGlobalColorTable = 7;
+            const packedField = 0x80 | (colorResolution << 4) | (sortFlag << 3) | sizeOfGlobalColorTable;
+            bytes.push(packedField);
+
+            bytes.push(0);
+            bytes.push(0);
+
+            bytes.push(...this.encodePalette());
+
+            bytes.push(0x21);
+            bytes.push(0xff);
+            bytes.push(0x0b);
+            bytes.push(...this.writeString('NETSCAPE2.0'));
+            bytes.push(0x03);
+            bytes.push(0x01);
+            bytes.push(0x00);
+            bytes.push(0x00);
+            bytes.push(0x00);
+
+            for (let frameIdx = 0; frameIdx < this.frames.length; frameIdx++) {
+                const frame = this.frames[frameIdx];
+                const imageData = frame.imageData;
+                const delay = Math.round(frame.delay / 10);
+
+                bytes.push(0x21);
+                bytes.push(0xf9);
+                bytes.push(0x04);
+                bytes.push(0x04);
+                bytes.push(...this.writeWord(delay));
+                bytes.push(0x00);
+                bytes.push(0x00);
+
+                bytes.push(0x2c);
+                bytes.push(...this.writeWord(0));
+                bytes.push(...this.writeWord(0));
+                bytes.push(...this.writeWord(this.width));
+                bytes.push(...this.writeWord(this.height));
+                bytes.push(0x00);
+
+                const indices = [];
+                for (let i = 0; i < imageData.data.length; i += 4) {
+                    const r = imageData.data[i];
+                    const g = imageData.data[i + 1];
+                    const b = imageData.data[i + 2];
+                    indices.push(this.getColorIndex(r, g, b));
+                }
+
+                const minCodeSize = 8;
+                bytes.push(minCodeSize);
+
+                const compressed = this.lzwCompress(indices, minCodeSize);
+
+                let offset = 0;
+                while (offset < compressed.length) {
+                    const blockSize = Math.min(255, compressed.length - offset);
+                    bytes.push(blockSize);
+                    for (let i = 0; i < blockSize; i++) {
+                        bytes.push(compressed[offset + i]);
+                    }
+                    offset += blockSize;
+                }
+                bytes.push(0x00);
+            }
+
+            bytes.push(0x3b);
+
+            return new Uint8Array(bytes);
+        }
+    }
+
+    async function exportGIF() {
+        const text = document.getElementById('preview-text').value;
+        const scale = parseInt(document.getElementById('preview-scale').value);
+        const fps = parseInt(document.getElementById('preview-fps').value);
+
+        const layout = getTextLayout(text, scale);
+        const padding = 20;
+        const maxEffectOffset = 10;
+        const totalWidth = Math.max(layout.totalWidth + padding * 2, 100);
+        const totalHeight = Math.max(layout.totalHeight + padding * 2 + maxEffectOffset * 2, 50);
+
+        const totalFrames = getAnimationCycleFrames(layout);
+
+        const offscreenCanvas = document.createElement('canvas');
+        offscreenCanvas.width = totalWidth;
+        offscreenCanvas.height = totalHeight;
+        const offCtx = offscreenCanvas.getContext('2d');
+
+        const encoder = new GIFEncoder(totalWidth, totalHeight);
+        const delay = Math.round(1000 / fps);
+
+        const exportBtn = document.getElementById('btn-export-gif');
+        const originalText = exportBtn.textContent;
+        exportBtn.disabled = true;
+
+        for (let frame = 0; frame < totalFrames; frame++) {
+            exportBtn.textContent = `导出中 ${frame + 1}/${totalFrames}`;
+
+            offCtx.fillStyle = '#0f0f23';
+            offCtx.fillRect(0, 0, totalWidth, totalHeight);
+
+            offCtx.save();
+            offCtx.translate(padding, padding + maxEffectOffset);
+            renderFrame(offCtx, frame, text, scale, totalWidth, totalHeight);
+            offCtx.restore();
+
+            const imageData = offCtx.getImageData(0, 0, totalWidth, totalHeight);
+            encoder.addFrame(imageData, delay);
+
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
+
+        const gifData = encoder.encode();
+        const blob = new Blob([gifData], { type: 'image/gif' });
+        const url = URL.createObjectURL(blob);
+
         const link = document.createElement('a');
-        link.download = `${fontData.metadata.name || 'pixel-font'}.png`;
-        link.href = previewCanvas.toDataURL('image/png');
+        link.download = `${fontData.metadata.name || 'pixel-text'}-animation.gif`;
+        link.href = url;
         link.click();
+
+        URL.revokeObjectURL(url);
+
+        exportBtn.textContent = originalText;
+        exportBtn.disabled = false;
     }
 
     function exportJSON() {
@@ -1998,11 +2894,32 @@ const PixelFontEditor = (function() {
             hideModal('batch-import-modal');
         });
         
-        document.getElementById('preview-text').addEventListener('input', renderPreview);
-        document.getElementById('preview-scale').addEventListener('change', renderPreview);
-        document.getElementById('preview-linewidth').addEventListener('input', renderPreview);
-        document.getElementById('preview-linespacing').addEventListener('input', renderPreview);
-        
+        document.getElementById('preview-text').addEventListener('input', () => {
+            resetAnimation();
+        });
+        document.getElementById('preview-scale').addEventListener('change', () => {
+            resetAnimation();
+        });
+        document.getElementById('preview-linewidth').addEventListener('input', () => {
+            resetAnimation();
+        });
+        document.getElementById('preview-linespacing').addEventListener('input', () => {
+            resetAnimation();
+        });
+        document.getElementById('preview-fps').addEventListener('change', (e) => {
+            effectsState.fps = parseInt(e.target.value);
+        });
+
+        document.getElementById('effect-type-select').addEventListener('change', (e) => {
+            if (e.target.value) {
+                addEffect(e.target.value);
+                e.target.value = '';
+            }
+        });
+
+        document.getElementById('btn-play-pause').addEventListener('click', togglePlayPause);
+        document.getElementById('btn-export-gif').addEventListener('click', exportGIF);
+
         document.getElementById('btn-export-png').addEventListener('click', exportPNG);
         document.getElementById('btn-export-json').addEventListener('click', exportJSON);
         document.getElementById('btn-export-bdf').addEventListener('click', exportBDF);
@@ -2104,11 +3021,39 @@ const PixelFontEditor = (function() {
         createDemoFont();
         initEventListeners();
         clearHistory();
+
+        effectsState.effects = [
+            {
+                id: 1,
+                type: 'gradient',
+                enabled: true,
+                params: {
+                    direction: 'vertical',
+                    startColor: '#3b82f6',
+                    endColor: '#8b5cf6'
+                }
+            },
+            {
+                id: 2,
+                type: 'wave',
+                enabled: true,
+                params: {
+                    amplitude: 2,
+                    frequency: 0.3
+                }
+            }
+        ];
+
+        renderEffectsPanel();
         
         renderGlyphCanvas();
         renderCharsetGrid();
         renderPreview();
         updateCurrentCharInfo();
+
+        if (hasDynamicEffects()) {
+            startAnimation();
+        }
     }
 
     return {
@@ -2116,7 +3061,8 @@ const PixelFontEditor = (function() {
         renderPreview,
         exportJSON,
         exportBDF,
-        exportPNG
+        exportPNG,
+        exportGIF
     };
 })();
 

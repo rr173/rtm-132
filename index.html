@@ -88,7 +88,7 @@
             <div class="preview-controls">
                 <div class="control-group">
                     <label>文本:</label>
-                    <input type="text" id="preview-text" value="Hello World 2025" class="text-input">
+                    <input type="text" id="preview-text" value="PIXEL FX" class="text-input">
                 </div>
                 <div class="control-group">
                     <label>倍率:</label>
@@ -112,11 +112,44 @@
                     <input type="number" id="preview-linespacing" value="4" min="0" max="20" step="1" class="number-input">
                 </div>
                 <div class="control-group">
+                    <label>帧率:</label>
+                    <select id="preview-fps">
+                        <option value="6">6fps</option>
+                        <option value="12" selected>12fps</option>
+                        <option value="24">24fps</option>
+                        <option value="30">30fps</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <button id="btn-play-pause" class="small-btn">⏸ 暂停</button>
+                    <span id="frame-display" class="frame-display">帧: 0</span>
+                </div>
+                <div class="control-group">
                     <button id="btn-export-png" class="small-btn">导出 PNG</button>
+                    <button id="btn-export-gif" class="small-btn">导出 GIF</button>
                 </div>
             </div>
-            <div class="preview-canvas-container">
-                <canvas id="preview-canvas"></canvas>
+            <div class="preview-main">
+                <div class="preview-canvas-container">
+                    <canvas id="preview-canvas"></canvas>
+                </div>
+                <div class="effects-panel">
+                    <div class="effects-header">
+                        <h3>文本特效</h3>
+                        <div class="effect-add">
+                            <select id="effect-type-select">
+                                <option value="">添加特效...</option>
+                                <option value="shadow">投影</option>
+                                <option value="stroke">描边</option>
+                                <option value="gradient">渐变填色</option>
+                                <option value="wave">波浪变形</option>
+                                <option value="typewriter">逐字出现</option>
+                                <option value="neon">霓虹闪烁</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="effects-list" id="effects-list"></div>
+                </div>
             </div>
         </footer>
     </div>

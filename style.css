@@ -299,7 +299,224 @@ body {
     flex-direction: column;
     background-color: var(--bg-secondary);
     border-top: 1px solid var(--border);
-    height: 280px;
+    height: 420px;
+}
+
+.preview-main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+.preview-canvas-container {
+    flex: 1;
+    overflow: auto;
+    padding: 16px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+}
+
+.effects-panel {
+    width: 320px;
+    background-color: var(--bg-tertiary);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.effects-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 12px;
+    background-color: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+}
+
+.effects-header h3 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.effect-add select {
+    padding: 4px 8px;
+    background-color: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.effects-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.effect-item {
+    background-color: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    transition: all 0.15s;
+}
+
+.effect-item.dragging {
+    opacity: 0.5;
+}
+
+.effect-item.drag-over {
+    border-color: var(--accent);
+    transform: translateY(2px);
+}
+
+.effect-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.effect-drag-handle {
+    cursor: grab;
+    color: var(--text-muted);
+    font-size: 14px;
+    padding: 0 4px;
+}
+
+.effect-drag-handle:active {
+    cursor: grabbing;
+}
+
+.effect-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    flex: 1;
+}
+
+.effect-toggle {
+    position: relative;
+    width: 32px;
+    height: 18px;
+    background-color: var(--border);
+    border-radius: 9px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.effect-toggle.active {
+    background-color: var(--accent);
+}
+
+.effect-toggle::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    background-color: white;
+    border-radius: 50%;
+    transition: transform 0.2s;
+}
+
+.effect-toggle.active::after {
+    transform: translateX(14px);
+}
+
+.effect-delete {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 0 4px;
+    transition: color 0.15s;
+}
+
+.effect-delete:hover {
+    color: var(--danger);
+}
+
+.effect-params {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.effect-param {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.effect-param label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    min-width: 32px;
+}
+
+.effect-param input[type="number"] {
+    width: 50px;
+    padding: 3px 6px;
+    background-color: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-primary);
+    font-size: 11px;
+}
+
+.effect-param input[type="range"] {
+    width: 70px;
+    height: 4px;
+}
+
+.effect-param input[type="color"] {
+    width: 28px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    cursor: pointer;
+    background: none;
+}
+
+.effect-param select {
+    padding: 3px 6px;
+    background-color: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-primary);
+    font-size: 11px;
+}
+
+.frame-display {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: monospace;
+    min-width: 50px;
+}
+
+#btn-play-pause {
+    min-width: 70px;
+}
+
+#btn-export-gif {
+    background-color: var(--success);
+}
+
+#btn-export-gif:hover {
+    background-color: #16a34a;
 }
 
 .preview-controls {
@@ -365,15 +582,6 @@ select {
 select:focus {
     outline: none;
     border-color: var(--accent);
-}
-
-.preview-canvas-container {
-    flex: 1;
-    overflow: auto;
-    padding: 16px;
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
 }
 
 #preview-canvas {
