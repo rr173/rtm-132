@@ -38,7 +38,21 @@ const PixelFontEditor = (function() {
         currentTab: 'glyphs',
         glyphFilter: '',
         clipboardGlyph: null,
-        animationDirty: true
+        animationDirty: true,
+        isRecording: false,
+        recordingStartTime: 0,
+        recordingOps: [],
+        playbackMode: false,
+        playbackGlyph: null,
+        playbackOps: [],
+        playbackSnapshot: null,
+        playbackCurrentStep: 0,
+        playbackIsPlaying: false,
+        playbackSpeed: 1,
+        playbackTimerId: null,
+        playbackHighlightPixels: [],
+        playbackHighlightAll: false,
+        playbackHighlightTimerId: null
     };
 
     let previewState = {
@@ -479,6 +493,8 @@ const PixelFontEditor = (function() {
     }
 
     function handleCanvasMouseDown(e) {
+        if (state.playbackMode) return;
+
         const { x, y } = getCanvasPixelCoords(e, canvas);
         const glyph = getCurrentGlyph();
         if (!glyph) return;
@@ -500,6 +516,14 @@ const PixelFontEditor = (function() {
             bresenhamLine(state.lineStart.x, state.lineStart.y, x, y, (lx, ly) => {
                 setPixel(glyph, lx, ly, 1);
             });
+            if (state.isRecording) {
+                recordOperation('line', {
+                    x0: state.lineStart.x,
+                    y0: state.lineStart.y,
+                    x1: x,
+                    y1: y
+                });
+            }
             state.lineStart = null;
             saveHistory();
             state.drawingModified = false;
@@ -513,11 +537,26 @@ const PixelFontEditor = (function() {
                     setPixel(glyph, rx, ry, 1);
                 }
             }
+            if (state.isRecording) {
+                recordOperation('rect', {
+                    x0: state.lineStart.x,
+                    y0: state.lineStart.y,
+                    x1: x,
+                    y1: y
+                });
+            }
             state.lineStart = null;
             saveHistory();
             state.drawingModified = false;
         } else {
             applyTool(x, y, glyph, canvas);
+            if (state.isRecording) {
+                if (state.currentTool === 'pencil') {
+                    recordOperation('pencil', { x, y });
+                } else if (state.currentTool === 'eraser') {
+                    recordOperation('eraser', { x, y });
+                }
+            }
             state.drawingModified = true;
         }
         
@@ -527,6 +566,8 @@ const PixelFontEditor = (function() {
     }
 
     function handleCanvasMouseMove(e) {
+        if (state.playbackMode) return;
+
         const { x, y } = getCanvasPixelCoords(e, canvas);
         state.lastMouseX = x;
         state.lastMouseY = y;
@@ -546,6 +587,13 @@ const PixelFontEditor = (function() {
         const glyph = getCurrentGlyph();
         if (!glyph) return;
         applyTool(x, y, glyph, canvas);
+        if (state.isRecording) {
+            if (state.currentTool === 'pencil') {
+                recordOperation('pencil', { x, y });
+            } else if (state.currentTool === 'eraser') {
+                recordOperation('eraser', { x, y });
+            }
+        }
         state.drawingModified = true;
         renderEditor();
         renderGlyphSet();
@@ -561,10 +609,14 @@ const PixelFontEditor = (function() {
     }
 
     function flipHorizontal() {
+        if (state.playbackMode) return;
         const glyph = getCurrentGlyph();
         if (!glyph) return;
         glyph.pixels = glyph.pixels.map(row => row.split('').reverse().join(''));
         glyph.modified = true;
+        if (state.isRecording) {
+            recordOperation('flipH', {});
+        }
         saveHistory();
         renderEditor();
         renderGlyphSet();
@@ -572,10 +624,14 @@ const PixelFontEditor = (function() {
     }
 
     function flipVertical() {
+        if (state.playbackMode) return;
         const glyph = getCurrentGlyph();
         if (!glyph) return;
         glyph.pixels.reverse();
         glyph.modified = true;
+        if (state.isRecording) {
+            recordOperation('flipV', {});
+        }
         saveHistory();
         renderEditor();
         renderGlyphSet();
@@ -583,6 +639,7 @@ const PixelFontEditor = (function() {
     }
 
     function moveGlyph(direction) {
+        if (state.playbackMode) return;
         const glyph = getCurrentGlyph();
         if (!glyph) return;
         const w = glyph.width;
@@ -591,13 +648,17 @@ const PixelFontEditor = (function() {
         if (direction === 'up') {
             glyph.pixels.shift();
             glyph.pixels.push('0'.repeat(w));
+            if (state.isRecording) recordOperation('moveUp', {});
         } else if (direction === 'down') {
             glyph.pixels.pop();
             glyph.pixels.unshift('0'.repeat(w));
+            if (state.isRecording) recordOperation('moveDown', {});
         } else if (direction === 'left') {
             glyph.pixels = glyph.pixels.map(row => row.substring(1) + '0');
+            if (state.isRecording) recordOperation('moveLeft', {});
         } else if (direction === 'right') {
             glyph.pixels = glyph.pixels.map(row => '0' + row.substring(0, w - 1));
+            if (state.isRecording) recordOperation('moveRight', {});
         }
         
         glyph.modified = true;
@@ -608,14 +669,475 @@ const PixelFontEditor = (function() {
     }
 
     function clearGlyph() {
+        if (state.playbackMode) return;
         const glyph = getCurrentGlyph();
         if (!glyph) return;
         glyph.pixels = glyph.pixels.map(() => '0'.repeat(glyph.width));
         glyph.modified = true;
+        if (state.isRecording) {
+            recordOperation('clear', {});
+        }
         saveHistory();
         renderEditor();
         renderGlyphSet();
         renderPreview();
+    }
+
+    function recordOperation(type, params) {
+        if (!state.isRecording) return;
+        const now = Date.now();
+        state.recordingOps.push({
+            type: type,
+            params: params,
+            timestamp: now - state.recordingStartTime
+        });
+    }
+
+    function startRecording() {
+        if (state.currentTab === 'ligatures') {
+            alert('连字暂不支持录制教程');
+            return;
+        }
+        state.isRecording = true;
+        state.recordingStartTime = Date.now();
+        state.recordingOps = [];
+        const glyph = getCurrentGlyph();
+        if (glyph) {
+            state.recordingInitialSnapshot = {
+                width: glyph.width,
+                height: glyph.height,
+                pixels: [...glyph.pixels]
+            };
+        }
+        const btn = document.getElementById('btn-record');
+        if (btn) btn.classList.add('recording');
+        saveHistory();
+    }
+
+    function stopRecording() {
+        state.isRecording = false;
+        const btn = document.getElementById('btn-record');
+        if (btn) btn.classList.remove('recording');
+
+        if (state.recordingOps.length === 0) {
+            alert('没有录制到任何操作');
+            return;
+        }
+
+        if (confirm('是否保存录制的教程为当前字形的书写教程？\n(再次录制将覆盖旧教程)')) {
+            saveTutorial();
+        }
+    }
+
+    function saveTutorial() {
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
+        glyph.tutorial = {
+            initialSnapshot: state.recordingInitialSnapshot,
+            operations: [...state.recordingOps]
+        };
+        renderGlyphSet();
+    }
+
+    function toggleRecording() {
+        if (state.playbackMode) {
+            alert('请先退出回放模式');
+            return;
+        }
+        if (state.isRecording) {
+            stopRecording();
+        } else {
+            startRecording();
+        }
+    }
+
+    function applyOperationToGlyph(glyph, op) {
+        const pixelsBefore = [];
+        for (let y = 0; y < glyph.height; y++) {
+            for (let x = 0; x < glyph.width; x++) {
+                pixelsBefore.push({ x, y, value: getPixel(glyph, x, y) });
+            }
+        }
+
+        switch (op.type) {
+            case 'pencil':
+                if (op.params.x !== undefined && op.params.y !== undefined) {
+                    setPixel(glyph, op.params.x, op.params.y, 1);
+                }
+                break;
+            case 'eraser':
+                if (op.params.x !== undefined && op.params.y !== undefined) {
+                    setPixel(glyph, op.params.x, op.params.y, 0);
+                }
+                break;
+            case 'line':
+                if (op.params.x0 !== undefined && op.params.y0 !== undefined &&
+                    op.params.x1 !== undefined && op.params.y1 !== undefined) {
+                    bresenhamLine(op.params.x0, op.params.y0, op.params.x1, op.params.y1, (lx, ly) => {
+                        setPixel(glyph, lx, ly, 1);
+                    });
+                }
+                break;
+            case 'rect':
+                if (op.params.x0 !== undefined && op.params.y0 !== undefined &&
+                    op.params.x1 !== undefined && op.params.y1 !== undefined) {
+                    const x0 = Math.min(op.params.x0, op.params.x1);
+                    const x1 = Math.max(op.params.x0, op.params.x1);
+                    const y0 = Math.min(op.params.y0, op.params.y1);
+                    const y1 = Math.max(op.params.y0, op.params.y1);
+                    for (let ry = y0; ry <= y1; ry++) {
+                        for (let rx = x0; rx <= x1; rx++) {
+                            setPixel(glyph, rx, ry, 1);
+                        }
+                    }
+                }
+                break;
+            case 'flipH':
+                glyph.pixels = glyph.pixels.map(row => row.split('').reverse().join(''));
+                break;
+            case 'flipV':
+                glyph.pixels.reverse();
+                break;
+            case 'flipD':
+                const newPixels = [];
+                for (let x = 0; x < glyph.width; x++) {
+                    let row = '';
+                    for (let y = 0; y < glyph.height; y++) {
+                        row += glyph.pixels[y][x];
+                    }
+                    newPixels.push(row);
+                }
+                const tempW = glyph.width;
+                glyph.width = glyph.height;
+                glyph.height = tempW;
+                glyph.pixels = newPixels;
+                break;
+            case 'moveUp':
+                glyph.pixels.shift();
+                glyph.pixels.push('0'.repeat(glyph.width));
+                break;
+            case 'moveDown':
+                glyph.pixels.pop();
+                glyph.pixels.unshift('0'.repeat(glyph.width));
+                break;
+            case 'moveLeft':
+                glyph.pixels = glyph.pixels.map(row => row.substring(1) + '0');
+                break;
+            case 'moveRight':
+                glyph.pixels = glyph.pixels.map(row => '0' + row.substring(0, glyph.width - 1));
+                break;
+            case 'clear':
+                glyph.pixels = glyph.pixels.map(() => '0'.repeat(glyph.width));
+                break;
+        }
+
+        const modifiedPixels = [];
+        const isGlobalOp = ['flipH', 'flipV', 'flipD', 'moveUp', 'moveDown', 'moveLeft', 'moveRight', 'clear'].includes(op.type);
+
+        if (isGlobalOp) {
+            return { isGlobal: true, pixels: [] };
+        }
+
+        for (let y = 0; y < glyph.height; y++) {
+            for (let x = 0; x < glyph.width; x++) {
+                const idx = y * glyph.width + x;
+                const newValue = getPixel(glyph, x, y);
+                if (pixelsBefore[idx].value !== newValue) {
+                    modifiedPixels.push({ x, y });
+                }
+            }
+        }
+
+        if (op.type === 'pencil' || op.type === 'eraser') {
+            if (modifiedPixels.length === 0 && op.params.x !== undefined) {
+                modifiedPixels.push({ x: op.params.x, y: op.params.y });
+            }
+        }
+
+        return { isGlobal: false, pixels: modifiedPixels };
+    }
+
+    function enterPlaybackMode(codePoint) {
+        const font = getCurrentFont();
+        const glyph = font.glyphs[codePoint];
+        if (!glyph || !glyph.tutorial) {
+            alert('该字形没有录制教程');
+            return;
+        }
+
+        if (state.isRecording) {
+            stopRecording();
+        }
+
+        state.currentCodePoint = codePoint;
+        state.currentTab = 'glyphs';
+        updateTabs();
+
+        state.playbackMode = true;
+        state.playbackOps = [...glyph.tutorial.operations];
+        state.playbackSnapshot = {
+            width: glyph.tutorial.initialSnapshot.width,
+            height: glyph.tutorial.initialSnapshot.height,
+            pixels: [...glyph.tutorial.initialSnapshot.pixels]
+        };
+        state.playbackGlyph = {
+            width: glyph.tutorial.initialSnapshot.width,
+            height: glyph.tutorial.initialSnapshot.height,
+            pixels: [...glyph.tutorial.initialSnapshot.pixels],
+            modified: false
+        };
+        state.playbackCurrentStep = 0;
+        state.playbackIsPlaying = false;
+        state.playbackHighlightPixels = [];
+        state.playbackHighlightAll = false;
+
+        document.getElementById('playback-controls').style.display = 'flex';
+        document.querySelector('.canvas-container').classList.add('playback-mode');
+        document.getElementById('playback-progress').max = state.playbackOps.length;
+        document.getElementById('playback-progress').value = 0;
+        document.getElementById('playback-step-info').textContent = `0 / ${state.playbackOps.length}`;
+        document.getElementById('btn-playback-play').textContent = '▶';
+
+        updateCurrentCharInfo();
+        renderPlaybackGlyphCanvas();
+        renderPlaybackPreview();
+    }
+
+    function exitPlaybackMode() {
+        state.playbackMode = false;
+        if (state.playbackTimerId) {
+            clearTimeout(state.playbackTimerId);
+            state.playbackTimerId = null;
+        }
+        if (state.playbackHighlightTimerId) {
+            clearTimeout(state.playbackHighlightTimerId);
+            state.playbackHighlightTimerId = null;
+        }
+        state.playbackGlyph = null;
+        state.playbackOps = [];
+        state.playbackSnapshot = null;
+        state.playbackCurrentStep = 0;
+        state.playbackIsPlaying = false;
+        state.playbackHighlightPixels = [];
+        state.playbackHighlightAll = false;
+
+        document.getElementById('playback-controls').style.display = 'none';
+        document.querySelector('.canvas-container').classList.remove('playback-mode');
+
+        clearHistory();
+        renderAll();
+    }
+
+    function playNextStep() {
+        if (state.playbackCurrentStep >= state.playbackOps.length) {
+            state.playbackIsPlaying = false;
+            document.getElementById('btn-playback-play').textContent = '▶';
+            return false;
+        }
+
+        const op = state.playbackOps[state.playbackCurrentStep];
+        const result = applyOperationToGlyph(state.playbackGlyph, op);
+
+        if (result.isGlobal) {
+            state.playbackHighlightAll = true;
+            state.playbackHighlightPixels = [];
+        } else {
+            state.playbackHighlightAll = false;
+            state.playbackHighlightPixels = result.pixels;
+        }
+
+        state.playbackCurrentStep++;
+        document.getElementById('playback-progress').value = state.playbackCurrentStep;
+        document.getElementById('playback-step-info').textContent = `${state.playbackCurrentStep} / ${state.playbackOps.length}`;
+
+        renderPlaybackGlyphCanvas();
+        renderPlaybackPreview();
+
+        if (state.playbackHighlightTimerId) {
+            clearTimeout(state.playbackHighlightTimerId);
+        }
+        state.playbackHighlightTimerId = setTimeout(() => {
+            state.playbackHighlightPixels = [];
+            state.playbackHighlightAll = false;
+            renderPlaybackGlyphCanvas();
+        }, 300);
+
+        return true;
+    }
+
+    function scheduleNextPlaybackStep() {
+        if (!state.playbackIsPlaying) return;
+        if (state.playbackCurrentStep >= state.playbackOps.length) {
+            state.playbackIsPlaying = false;
+            document.getElementById('btn-playback-play').textContent = '▶';
+            return;
+        }
+
+        const currentOp = state.playbackOps[state.playbackCurrentStep];
+        const nextOp = state.playbackOps[state.playbackCurrentStep + 1];
+        let delay = 100;
+
+        if (nextOp) {
+            delay = (nextOp.timestamp - currentOp.timestamp) / state.playbackSpeed;
+            delay = Math.max(30, Math.min(delay, 2000));
+        }
+
+        state.playbackTimerId = setTimeout(() => {
+            if (playNextStep()) {
+                scheduleNextPlaybackStep();
+            }
+        }, delay);
+    }
+
+    function togglePlaybackPlay() {
+        if (state.playbackCurrentStep >= state.playbackOps.length) {
+            state.playbackCurrentStep = 0;
+            state.playbackGlyph = {
+                width: state.playbackSnapshot.width,
+                height: state.playbackSnapshot.height,
+                pixels: [...state.playbackSnapshot.pixels],
+                modified: false
+            };
+            document.getElementById('playback-progress').value = 0;
+            document.getElementById('playback-step-info').textContent = `0 / ${state.playbackOps.length}`;
+        }
+
+        state.playbackIsPlaying = !state.playbackIsPlaying;
+        document.getElementById('btn-playback-play').textContent = state.playbackIsPlaying ? '⏸' : '▶';
+
+        if (state.playbackIsPlaying) {
+            if (state.playbackCurrentStep === 0) {
+                playNextStep();
+            }
+            scheduleNextPlaybackStep();
+        } else {
+            if (state.playbackTimerId) {
+                clearTimeout(state.playbackTimerId);
+                state.playbackTimerId = null;
+            }
+        }
+    }
+
+    function seekPlayback(step) {
+        if (state.playbackTimerId) {
+            clearTimeout(state.playbackTimerId);
+            state.playbackTimerId = null;
+        }
+
+        state.playbackGlyph = {
+            width: state.playbackSnapshot.width,
+            height: state.playbackSnapshot.height,
+            pixels: [...state.playbackSnapshot.pixels],
+            modified: false
+        };
+        state.playbackHighlightPixels = [];
+        state.playbackHighlightAll = false;
+
+        for (let i = 0; i < step; i++) {
+            applyOperationToGlyph(state.playbackGlyph, state.playbackOps[i]);
+        }
+
+        state.playbackCurrentStep = step;
+        document.getElementById('playback-progress').value = step;
+        document.getElementById('playback-step-info').textContent = `${step} / ${state.playbackOps.length}`;
+
+        renderPlaybackGlyphCanvas();
+        renderPlaybackPreview();
+
+        if (state.playbackIsPlaying) {
+            scheduleNextPlaybackStep();
+        }
+    }
+
+    function setPlaybackSpeed(speed) {
+        state.playbackSpeed = parseFloat(speed);
+    }
+
+    function renderPlaybackGlyphCanvas() {
+        const font = getCurrentFont();
+        const glyph = state.playbackGlyph;
+        if (!glyph) return;
+
+        const width = glyph.width * PIXEL_SIZE;
+        const height = glyph.height * PIXEL_SIZE;
+
+        canvas.width = width;
+        canvas.height = height;
+
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, 0, width, height);
+
+        const highlightSet = new Set();
+        state.playbackHighlightPixels.forEach(p => {
+            highlightSet.add(`${p.x},${p.y}`);
+        });
+
+        for (let y = 0; y < glyph.height; y++) {
+            for (let x = 0; x < glyph.width; x++) {
+                const px = x * PIXEL_SIZE;
+                const py = y * PIXEL_SIZE;
+
+                if (getPixel(glyph, x, y)) {
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(px, py, PIXEL_SIZE, PIXEL_SIZE);
+                }
+
+                if (state.playbackHighlightAll || highlightSet.has(`${x},${y}`)) {
+                    ctx.strokeStyle = '#facc15';
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(px + 1.5, py + 1.5, PIXEL_SIZE - 3, PIXEL_SIZE - 3);
+                } else {
+                    ctx.strokeStyle = '#2a2a4a';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(px + 0.5, py + 0.5, PIXEL_SIZE - 1, PIXEL_SIZE - 1);
+                }
+            }
+        }
+
+        const ascentY = (glyph.height - font.metadata.ascent) * PIXEL_SIZE;
+        const baselineY = (glyph.height - font.metadata.baseline) * PIXEL_SIZE;
+        const descentY = (glyph.height - font.metadata.descent) * PIXEL_SIZE;
+
+        ctx.strokeStyle = 'rgba(99, 102, 241, 0.4)';
+        ctx.lineWidth = 2;
+
+        ctx.beginPath();
+        ctx.moveTo(0, ascentY + 0.5);
+        ctx.lineTo(width, ascentY + 0.5);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(34, 197, 94, 0.5)';
+        ctx.beginPath();
+        ctx.moveTo(0, baselineY + 0.5);
+        ctx.lineTo(width, baselineY + 0.5);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(245, 158, 11, 0.4)';
+        ctx.beginPath();
+        ctx.moveTo(0, descentY + 0.5);
+        ctx.lineTo(width, descentY + 0.5);
+        ctx.stroke();
+    }
+
+    function renderPlaybackPreview() {
+        if (!state.playbackMode || !state.playbackGlyph) return;
+
+        const text = document.getElementById('preview-text').value;
+        const scale = previewState.scale;
+
+        const font = getCurrentFont();
+        const originalGlyph = font.glyphs[state.currentCodePoint];
+        const tempBackup = originalGlyph ? { ...originalGlyph, pixels: [...originalGlyph.pixels] } : null;
+
+        if (originalGlyph) {
+            originalGlyph.pixels = [...state.playbackGlyph.pixels];
+        }
+
+        renderPreview();
+
+        if (originalGlyph && tempBackup) {
+            originalGlyph.pixels = tempBackup.pixels;
+        }
     }
 
     function drawGlyphToCanvas(targetCtx, glyph, x, y, scale, color = '#ffffff') {
@@ -661,6 +1183,10 @@ const PixelFontEditor = (function() {
     }
 
     function renderEditor() {
+        if (state.playbackMode) {
+            renderPlaybackGlyphCanvas();
+            return;
+        }
         if (state.currentTab === 'ligatures') {
             renderGlyphCanvas();
         } else {
@@ -712,6 +1238,7 @@ const PixelFontEditor = (function() {
                 const codePoint = item;
                 const glyph = getGlyph(codePoint);
                 const isEmpty = isGlyphEmpty(glyph);
+                const hasTutorial = glyph && glyph.tutorial;
                 
                 if (codePoint === state.currentCodePoint) div.classList.add('active');
                 if (isEmpty) div.classList.add('empty');
@@ -726,8 +1253,22 @@ const PixelFontEditor = (function() {
                 
                 div.appendChild(canvasEl);
                 div.appendChild(label);
+
+                if (hasTutorial) {
+                    const playBtn = document.createElement('button');
+                    playBtn.className = 'charset-play-icon';
+                    playBtn.title = '播放教程';
+                    playBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        enterPlaybackMode(codePoint);
+                    });
+                    div.appendChild(playBtn);
+                }
                 
                 div.addEventListener('click', () => {
+                    if (state.playbackMode) {
+                        exitPlaybackMode();
+                    }
                     state.currentCodePoint = codePoint;
                     state.currentTab = 'glyphs';
                     clearHistory();
@@ -1532,7 +2073,7 @@ const PixelFontEditor = (function() {
 
     function exportJSON() {
         const exportData = {
-            version: 2,
+            version: 3,
             fonts: []
         };
 
@@ -1546,11 +2087,22 @@ const PixelFontEditor = (function() {
             
             Object.keys(font.glyphs).forEach(cp => {
                 const g = font.glyphs[cp];
-                fontExport.glyphs[cp] = {
+                const glyphExport = {
                     width: g.width,
                     height: g.height,
                     pixels: g.pixels
                 };
+                if (g.tutorial) {
+                    glyphExport.tutorial = {
+                        initialSnapshot: {
+                            width: g.tutorial.initialSnapshot.width,
+                            height: g.tutorial.initialSnapshot.height,
+                            pixels: [...g.tutorial.initialSnapshot.pixels]
+                        },
+                        operations: [...g.tutorial.operations]
+                    };
+                }
+                fontExport.glyphs[cp] = glyphExport;
             });
             
             Object.keys(font.ligatures).forEach(key => {
@@ -1593,12 +2145,23 @@ const PixelFontEditor = (function() {
                         if (fontData.glyphs) {
                             Object.keys(fontData.glyphs).forEach(cp => {
                                 const g = fontData.glyphs[cp];
-                                font.glyphs[cp] = {
+                                const glyph = {
                                     width: g.width,
                                     height: g.height,
                                     pixels: [...g.pixels],
                                     modified: false
                                 };
+                                if (g.tutorial) {
+                                    glyph.tutorial = {
+                                        initialSnapshot: {
+                                            width: g.tutorial.initialSnapshot.width,
+                                            height: g.tutorial.initialSnapshot.height,
+                                            pixels: [...g.tutorial.initialSnapshot.pixels]
+                                        },
+                                        operations: [...g.tutorial.operations]
+                                    };
+                                }
+                                font.glyphs[cp] = glyph;
                             });
                         }
                         
@@ -1628,12 +2191,23 @@ const PixelFontEditor = (function() {
                     if (data.glyphs) {
                         Object.keys(data.glyphs).forEach(cp => {
                             const g = data.glyphs[cp];
-                            font.glyphs[cp] = {
+                            const glyph = {
                                 width: g.width,
                                 height: g.height,
                                 pixels: [...g.pixels],
                                 modified: false
                             };
+                            if (g.tutorial) {
+                                glyph.tutorial = {
+                                    initialSnapshot: {
+                                        width: g.tutorial.initialSnapshot.width,
+                                        height: g.tutorial.initialSnapshot.height,
+                                        pixels: [...g.tutorial.initialSnapshot.pixels]
+                                    },
+                                    operations: [...g.tutorial.operations]
+                                };
+                            }
+                            font.glyphs[cp] = glyph;
                         });
                     }
                     
@@ -2174,6 +2748,7 @@ const PixelFontEditor = (function() {
     }
 
     function pasteGlyph(codePoint) {
+        if (state.playbackMode) return;
         if (!state.clipboardGlyph) {
             alert('剪贴板为空');
             return;
@@ -2196,6 +2771,7 @@ const PixelFontEditor = (function() {
     }
 
     function deleteGlyph(codePoint) {
+        if (state.playbackMode) return;
         const cp = codePoint !== undefined ? codePoint : state.currentCodePoint;
         const font = getCurrentFont();
         const char = String.fromCodePoint(cp);
@@ -2217,6 +2793,7 @@ const PixelFontEditor = (function() {
     }
 
     function createVariant(type) {
+        if (state.playbackMode) return;
         saveHistory();
         const glyph = getCurrentGlyph();
         if (!glyph) return;
@@ -2228,11 +2805,13 @@ const PixelFontEditor = (function() {
                 for (let y = 0; y < glyph.height; y++) {
                     newPixels.push(glyph.pixels[y].split('').reverse().join(''));
                 }
+                if (state.isRecording) recordOperation('flipH', {});
                 break;
             case 'flip-v':
                 for (let y = glyph.height - 1; y >= 0; y--) {
                     newPixels.push(glyph.pixels[y]);
                 }
+                if (state.isRecording) recordOperation('flipV', {});
                 break;
             case 'rotate-cw':
                 for (let x = 0; x < glyph.width; x++) {
@@ -2245,6 +2824,7 @@ const PixelFontEditor = (function() {
                 const tempW = glyph.width;
                 glyph.width = glyph.height;
                 glyph.height = tempW;
+                if (state.isRecording) recordOperation('flipD', {});
                 break;
             case 'rotate-ccw':
                 for (let x = glyph.width - 1; x >= 0; x--) {
@@ -2275,23 +2855,27 @@ const PixelFontEditor = (function() {
                 for (let y = 0; y < glyph.height; y++) {
                     newPixels.push(glyph.pixels[y].substring(1) + '0');
                 }
+                if (state.isRecording) recordOperation('moveLeft', {});
                 break;
             case 'shift-right':
                 for (let y = 0; y < glyph.height; y++) {
                     newPixels.push('0' + glyph.pixels[y].substring(0, glyph.width - 1));
                 }
+                if (state.isRecording) recordOperation('moveRight', {});
                 break;
             case 'shift-up':
                 for (let y = 1; y < glyph.height; y++) {
                     newPixels.push(glyph.pixels[y]);
                 }
                 newPixels.push('0'.repeat(glyph.width));
+                if (state.isRecording) recordOperation('moveUp', {});
                 break;
             case 'shift-down':
                 newPixels.push('0'.repeat(glyph.width));
                 for (let y = 0; y < glyph.height - 1; y++) {
                     newPixels.push(glyph.pixels[y]);
                 }
+                if (state.isRecording) recordOperation('moveDown', {});
                 break;
         }
         
@@ -2863,6 +3447,7 @@ const PixelFontEditor = (function() {
             }
         };
         
+        document.getElementById('btn-record').onclick = () => toggleRecording();
         document.getElementById('btn-clear-glyph').onclick = () => clearGlyph();
         document.getElementById('btn-copy-glyph').onclick = () => copyGlyph();
         document.getElementById('btn-paste-glyph').onclick = () => pasteGlyph();
@@ -3022,11 +3607,31 @@ const PixelFontEditor = (function() {
                 exportJSON();
             }
             if (e.key === 'Escape') {
+                if (state.playbackMode) {
+                    e.preventDefault();
+                    exitPlaybackMode();
+                    return;
+                }
                 document.querySelectorAll('.modal-overlay.active').forEach(m => {
                     hideModal(m.id);
                 });
             }
+            if (state.playbackMode) {
+                if (e.key === ' ') {
+                    e.preventDefault();
+                    togglePlaybackPlay();
+                }
+            }
         });
+
+        document.getElementById('btn-playback-play').onclick = () => togglePlaybackPlay();
+        document.getElementById('btn-exit-playback').onclick = () => exitPlaybackMode();
+        document.getElementById('playback-progress').oninput = (e) => {
+            seekPlayback(parseInt(e.target.value));
+        };
+        document.getElementById('playback-speed').onchange = (e) => {
+            setPlaybackSpeed(e.target.value);
+        };
         
         window.addEventListener('resize', () => {
             if (!state.compareMode) {

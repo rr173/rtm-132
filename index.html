@@ -40,6 +40,9 @@
                 
                 <div class="editor-toolbar">
                     <div class="tool-group">
+                        <button id="btn-record" class="tool-btn record-btn" title="录制教程">●</button>
+                    </div>
+                    <div class="tool-group">
                         <button id="btn-clear-glyph" class="tool-btn" title="清空">🗑</button>
                         <button id="btn-copy-glyph" class="tool-btn" title="复制">⎘</button>
                         <button id="btn-paste-glyph" class="tool-btn" title="粘贴">⎙</button>
@@ -69,6 +72,18 @@
 
                 <div class="canvas-container">
                     <canvas id="glyph-canvas"></canvas>
+                </div>
+                <div id="playback-controls" class="playback-controls" style="display: none;">
+                    <button id="btn-playback-play" class="playback-btn" title="播放/暂停">▶</button>
+                    <input type="range" id="playback-progress" class="playback-progress" min="0" max="0" value="0">
+                    <select id="playback-speed" class="playback-speed">
+                        <option value="0.5">0.5x</option>
+                        <option value="1" selected>1x</option>
+                        <option value="2">2x</option>
+                        <option value="4">4x</option>
+                    </select>
+                    <span id="playback-step-info" class="playback-step-info">0 / 0</span>
+                    <button id="btn-exit-playback" class="playback-btn exit-btn" title="退出回放">✕ 退出回放</button>
                 </div>
             </section>
 
