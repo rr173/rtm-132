@@ -8,21 +8,14 @@ const PixelFontEditor = (function() {
         ['W', 'a', -1], ['W', 'o', -1], ['Y', 'o', -1], ['K', 'e', -1]
     ];
 
-    let fontData = {
-        metadata: {
-            name: 'Demo Pixel Font',
-            author: 'Pixel Font Designer',
-            version: '1.0',
-            glyphWidth: 8,
-            glyphHeight: 12,
-            ascent: 10,
-            baseline: 2,
-            descent: 0,
-            defaultSpacing: 1
-        },
-        glyphs: {},
-        kerning: {},
-        ligatures: {}
+    const FONT_COLORS = [
+        '#6366f1', '#ec4899', '#22c55e', '#f59e0b', '#ef4444',
+        '#06b6d4', '#a855f7', '#84cc16', '#f97316', '#14b8a6'
+    ];
+
+    let workspace = {
+        fonts: [],
+        currentFontIndex: 0
     };
 
     let state = {
@@ -30,79 +23,195 @@ const PixelFontEditor = (function() {
         currentTool: 'pencil',
         isDrawing: false,
         lineStart: null,
+        lastMouseX: 0,
+        lastMouseY: 0,
+        drawingModified: false,
         history: [],
         historyIndex: -1,
         searchFilter: '',
         currentLigature: null,
-        contextMenuCodePoint: null
+        contextMenuCodePoint: null,
+        compareMode: false,
+        compareFontAIndex: 0,
+        compareFontBIndex: 1,
+        compareCharIndex: 0,
+        currentTab: 'glyphs',
+        glyphFilter: '',
+        clipboardGlyph: null,
+        animationDirty: true
     };
 
-    let effectsState = {
-        effects: [],
+    let previewState = {
         currentFrame: 0,
         isPlaying: true,
         fps: 12,
         lastFrameTime: 0,
         animationId: null,
-        draggedEffectId: null
+        effectType: 'none',
+        waveAmp: 3,
+        waveSpeed: 2,
+        waveLength: 80,
+        glowIntensity: 4,
+        gradientColor1: '#ff6b6b',
+        gradientColor2: '#4ecdc4',
+        gradientSpeed: 1,
+        textColor: '#ffffff',
+        scale: 3,
+        lineWidth: 800,
+        lineSpacing: 2
     };
 
-    const EFFECT_TYPES = {
-        shadow: {
-            name: '投影',
-            isDynamic: false,
-            defaultParams: {
-                offsetX: 2,
-                offsetY: 2,
-                color: '#000000',
-                opacity: 0.5
-            }
-        },
-        stroke: {
-            name: '描边',
-            isDynamic: false,
-            defaultParams: {
-                width: 1,
-                color: '#000000'
-            }
-        },
-        gradient: {
-            name: '渐变填色',
-            isDynamic: false,
-            defaultParams: {
-                direction: 'vertical',
-                startColor: '#6366f1',
-                endColor: '#ec4899'
-            }
-        },
-        wave: {
-            name: '波浪变形',
-            isDynamic: true,
-            defaultParams: {
-                amplitude: 2,
-                frequency: 0.3
-            }
-        },
-        typewriter: {
-            name: '逐字出现',
-            isDynamic: true,
-            defaultParams: {
-                speed: 3,
-                holdFrames: 12
-            }
-        },
-        neon: {
-            name: '霓虹闪烁',
-            isDynamic: true,
-            defaultParams: {
-                color1: '#6366f1',
-                color2: '#ec4899',
-                period: 24
-            }
+    let canvas, ctx, previewCanvas, previewCtx;
+
+    function getCurrentFont() {
+        return workspace.fonts[workspace.currentFontIndex];
+    }
+
+    function getFontByIndex(index) {
+        return workspace.fonts[index];
+    }
+
+    function getFontByName(name) {
+        return workspace.fonts.find(f => f.metadata.name === name);
+    }
+
+    function getFontIndexByName(name) {
+        return workspace.fonts.findIndex(f => f.metadata.name === name);
+    }
+
+    function getFontColor(index) {
+        return FONT_COLORS[index % FONT_COLORS.length];
+    }
+
+    function createFontData(name, config) {
+        return {
+            metadata: {
+                name: name || 'New Font',
+                author: config?.author || 'Pixel Font Designer',
+                version: config?.version || '1.0',
+                glyphWidth: config?.glyphWidth || 8,
+                glyphHeight: config?.glyphHeight || 12,
+                ascent: config?.ascent || 10,
+                baseline: config?.baseline || 2,
+                descent: config?.descent || 0,
+                defaultSpacing: config?.defaultSpacing || 1
+            },
+            glyphs: {},
+            kerning: {},
+            ligatures: {}
+        };
+    }
+
+    function cloneFontData(fontData) {
+        const newFont = {
+            metadata: { ...fontData.metadata },
+            glyphs: {},
+            kerning: { ...fontData.kerning },
+            ligatures: {}
+        };
+        Object.keys(fontData.glyphs).forEach(cp => {
+            const g = fontData.glyphs[cp];
+            newFont.glyphs[cp] = {
+                width: g.width,
+                height: g.height,
+                pixels: [...g.pixels],
+                modified: g.modified
+            };
+        });
+        Object.keys(fontData.ligatures).forEach(key => {
+            const l = fontData.ligatures[key];
+            newFont.ligatures[key] = {
+                width: l.width,
+                height: l.height,
+                pixels: [...l.pixels],
+                modified: l.modified
+            };
+        });
+        return newFont;
+    }
+
+    function addBlankFont(name) {
+        const current = getCurrentFont();
+        const config = current ? {
+            glyphWidth: current.metadata.glyphWidth,
+            glyphHeight: current.metadata.glyphHeight,
+            ascent: current.metadata.ascent,
+            baseline: current.metadata.baseline,
+            descent: current.metadata.descent,
+            defaultSpacing: current.metadata.defaultSpacing
+        } : undefined;
+        const fontName = name || prompt('请输入新字体名称：', 'New Font');
+        if (!fontName) return;
+        const newFont = createFontData(fontName, config);
+        workspace.fonts.push(newFont);
+        workspace.currentFontIndex = workspace.fonts.length - 1;
+        clearHistory();
+        renderAll();
+        renderFontSelector();
+    }
+
+    function duplicateFont(sourceIndex, name) {
+        const idx = sourceIndex !== undefined ? sourceIndex : workspace.currentFontIndex;
+        const source = workspace.fonts[idx];
+        const newName = name || prompt('请输入新字体名称：', source.metadata.name + ' Copy');
+        if (!newName) return;
+        const newFont = cloneFontData(source);
+        newFont.metadata.name = newName;
+        workspace.fonts.push(newFont);
+        workspace.currentFontIndex = workspace.fonts.length - 1;
+        clearHistory();
+        renderAll();
+        renderFontSelector();
+    }
+
+    function deleteFont(index) {
+        const idx = index !== undefined ? index : workspace.currentFontIndex;
+        if (workspace.fonts.length <= 1) {
+            alert('至少保留一套字体！');
+            return;
         }
-    };
+        const font = workspace.fonts[idx];
+        if (!confirm(`确定要删除字体 "${font.metadata.name}" 吗？`)) return;
 
-    let canvas, ctx, previewCanvas, previewCtx, ligatureCanvas, ligatureCtx;
+        workspace.fonts.splice(idx, 1);
+        if (workspace.currentFontIndex >= workspace.fonts.length) {
+            workspace.currentFontIndex = workspace.fonts.length - 1;
+        }
+        if (state.compareFontAIndex >= workspace.fonts.length) {
+            state.compareFontAIndex = 0;
+        }
+        if (state.compareFontBIndex >= workspace.fonts.length) {
+            state.compareFontBIndex = Math.min(1, workspace.fonts.length - 1);
+        }
+        clearHistory();
+        renderAll();
+        renderFontSelector();
+    }
+
+    function renameFont(index, newName) {
+        const idx = index !== undefined ? index : workspace.currentFontIndex;
+        const name = newName || prompt('请输入新的字体名称：', workspace.fonts[idx].metadata.name);
+        if (!name || !name.trim()) {
+            return false;
+        }
+        const trimmedName = name.trim();
+        if (workspace.fonts.some((f, i) => i !== idx && f.metadata.name === trimmedName)) {
+            alert('字体名称已存在！');
+            return false;
+        }
+        workspace.fonts[idx].metadata.name = trimmedName;
+        renderFontSelector();
+        renderPreview();
+        return true;
+    }
+
+    function switchFont(index) {
+        if (index < 0 || index >= workspace.fonts.length) return;
+        workspace.currentFontIndex = index;
+        clearHistory();
+        renderAll();
+        renderFontSelector();
+    }
 
     function createEmptyGlyph(width, height) {
         const rows = [];
@@ -131,13 +240,35 @@ const PixelFontEditor = (function() {
     }
 
     function getGlyph(codePoint) {
-        if (!fontData.glyphs[codePoint]) {
-            fontData.glyphs[codePoint] = createEmptyGlyph(
-                fontData.metadata.glyphWidth,
-                fontData.metadata.glyphHeight
+        const font = getCurrentFont();
+        return getGlyphFromFont(font, codePoint);
+    }
+
+    function getGlyphFromFont(font, codePoint) {
+        if (!font.glyphs[codePoint]) {
+            font.glyphs[codePoint] = createEmptyGlyph(
+                font.metadata.glyphWidth,
+                font.metadata.glyphHeight
             );
         }
-        return fontData.glyphs[codePoint];
+        return font.glyphs[codePoint];
+    }
+
+    function getCurrentGlyph() {
+        if (state.currentTab === 'ligatures' && state.currentLigature) {
+            const font = getCurrentFont();
+            return font.ligatures[state.currentLigature];
+        }
+        return getGlyph(state.currentCodePoint);
+    }
+
+    function ensureGlyph(codePoint) {
+        getGlyph(codePoint);
+    }
+
+    function getAvailableCodePoints() {
+        const font = getCurrentFont();
+        return Object.keys(font.glyphs).map(Number).sort((a, b) => a - b);
     }
 
     function setPixel(glyph, x, y, value) {
@@ -176,10 +307,11 @@ const PixelFontEditor = (function() {
     }
 
     function pushHistorySnapshot() {
-        const currentGlyph = getGlyph(state.currentCodePoint);
         const snapshot = {
             codePoint: state.currentCodePoint,
-            glyph: cloneGlyph(currentGlyph)
+            currentTab: state.currentTab,
+            currentLigature: state.currentLigature,
+            glyph: cloneGlyph(getCurrentGlyph())
         };
 
         state.history = state.history.slice(0, state.historyIndex + 1);
@@ -200,10 +332,20 @@ const PixelFontEditor = (function() {
         if (state.historyIndex <= 0) return;
         state.historyIndex--;
         const snapshot = state.history[state.historyIndex];
-        fontData.glyphs[snapshot.codePoint] = cloneGlyph(snapshot.glyph);
+        const font = getCurrentFont();
+        
         state.currentCodePoint = snapshot.codePoint;
-        renderGlyphCanvas();
-        renderCharsetGrid();
+        state.currentTab = snapshot.currentTab;
+        state.currentLigature = snapshot.currentLigature;
+        
+        if (snapshot.currentTab === 'ligatures' && snapshot.currentLigature) {
+            font.ligatures[snapshot.currentLigature] = cloneGlyph(snapshot.glyph);
+        } else {
+            font.glyphs[snapshot.codePoint] = cloneGlyph(snapshot.glyph);
+        }
+        
+        renderEditor();
+        renderGlyphSet();
         renderPreview();
         updateCurrentCharInfo();
     }
@@ -212,10 +354,20 @@ const PixelFontEditor = (function() {
         if (state.historyIndex >= state.history.length - 1) return;
         state.historyIndex++;
         const snapshot = state.history[state.historyIndex];
-        fontData.glyphs[snapshot.codePoint] = cloneGlyph(snapshot.glyph);
+        const font = getCurrentFont();
+        
         state.currentCodePoint = snapshot.codePoint;
-        renderGlyphCanvas();
-        renderCharsetGrid();
+        state.currentTab = snapshot.currentTab;
+        state.currentLigature = snapshot.currentLigature;
+        
+        if (snapshot.currentTab === 'ligatures' && snapshot.currentLigature) {
+            font.ligatures[snapshot.currentLigature] = cloneGlyph(snapshot.glyph);
+        } else {
+            font.glyphs[snapshot.codePoint] = cloneGlyph(snapshot.glyph);
+        }
+        
+        renderEditor();
+        renderGlyphSet();
         renderPreview();
         updateCurrentCharInfo();
     }
@@ -227,7 +379,10 @@ const PixelFontEditor = (function() {
     }
 
     function renderGlyphCanvas() {
-        const glyph = getGlyph(state.currentCodePoint);
+        const font = getCurrentFont();
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
+        
         const width = glyph.width * PIXEL_SIZE;
         const height = glyph.height * PIXEL_SIZE;
         
@@ -253,9 +408,9 @@ const PixelFontEditor = (function() {
             }
         }
         
-        const ascentY = (glyph.height - fontData.metadata.ascent) * PIXEL_SIZE;
-        const baselineY = (glyph.height - fontData.metadata.baseline) * PIXEL_SIZE;
-        const descentY = (glyph.height - fontData.metadata.descent) * PIXEL_SIZE;
+        const ascentY = (glyph.height - font.metadata.ascent) * PIXEL_SIZE;
+        const baselineY = (glyph.height - font.metadata.baseline) * PIXEL_SIZE;
+        const descentY = (glyph.height - font.metadata.descent) * PIXEL_SIZE;
         
         ctx.strokeStyle = 'rgba(99, 102, 241, 0.4)';
         ctx.lineWidth = 2;
@@ -295,36 +450,6 @@ const PixelFontEditor = (function() {
         }
     }
 
-    function renderLigatureCanvas() {
-        if (!state.currentLigature || !fontData.ligatures[state.currentLigature]) return;
-        
-        const ligature = fontData.ligatures[state.currentLigature];
-        const width = ligature.width * PIXEL_SIZE;
-        const height = ligature.height * PIXEL_SIZE;
-        
-        ligatureCanvas.width = width;
-        ligatureCanvas.height = height;
-        
-        ligatureCtx.fillStyle = '#1a1a2e';
-        ligatureCtx.fillRect(0, 0, width, height);
-        
-        for (let y = 0; y < ligature.height; y++) {
-            for (let x = 0; x < ligature.width; x++) {
-                const px = x * PIXEL_SIZE;
-                const py = y * PIXEL_SIZE;
-                
-                if (getPixel(ligature, x, y)) {
-                    ligatureCtx.fillStyle = '#ffffff';
-                    ligatureCtx.fillRect(px, py, PIXEL_SIZE, PIXEL_SIZE);
-                }
-                
-                ligatureCtx.strokeStyle = '#2a2a4a';
-                ligatureCtx.lineWidth = 1;
-                ligatureCtx.strokeRect(px + 0.5, py + 0.5, PIXEL_SIZE - 1, PIXEL_SIZE - 1);
-            }
-        }
-    }
-
     function getCanvasPixelCoords(e, targetCanvas) {
         const rect = targetCanvas.getBoundingClientRect();
         const x = Math.floor((e.clientX - rect.left) / PIXEL_SIZE);
@@ -355,7 +480,8 @@ const PixelFontEditor = (function() {
 
     function handleCanvasMouseDown(e) {
         const { x, y } = getCanvasPixelCoords(e, canvas);
-        const glyph = getGlyph(state.currentCodePoint);
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
         
         state.isDrawing = true;
         state.lastMouseX = x;
@@ -395,8 +521,8 @@ const PixelFontEditor = (function() {
             state.drawingModified = true;
         }
         
-        renderGlyphCanvas();
-        renderCharsetGrid();
+        renderEditor();
+        renderGlyphSet();
         renderPreview();
     }
 
@@ -417,11 +543,12 @@ const PixelFontEditor = (function() {
             return;
         }
         
-        const glyph = getGlyph(state.currentCodePoint);
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
         applyTool(x, y, glyph, canvas);
         state.drawingModified = true;
-        renderGlyphCanvas();
-        renderCharsetGrid();
+        renderEditor();
+        renderGlyphSet();
         renderPreview();
     }
 
@@ -433,98 +560,31 @@ const PixelFontEditor = (function() {
         state.drawingModified = false;
     }
 
-    function handleLigatureMouseDown(e) {
-        if (!state.currentLigature || !fontData.ligatures[state.currentLigature]) return;
-        
-        const { x, y } = getCanvasPixelCoords(e, ligatureCanvas);
-        const ligature = fontData.ligatures[state.currentLigature];
-        
-        state.isDrawing = true;
-        
-        if (state.currentTool === 'line' || state.currentTool === 'rect') {
-            if (!state.lineStart) {
-                state.lineStart = { x, y };
-                renderLigatureCanvas();
-                return;
-            }
-        }
-        
-        if (state.currentTool === 'line' && state.lineStart) {
-            bresenhamLine(state.lineStart.x, state.lineStart.y, x, y, (lx, ly) => {
-                setPixel(ligature, lx, ly, 1);
-            });
-            state.lineStart = null;
-        } else {
-            applyTool(x, y, ligature, ligatureCanvas);
-        }
-        
-        renderLigatureCanvas();
-        renderPreview();
-    }
-
-    function handleLigatureMouseMove(e) {
-        if (!state.currentLigature || !fontData.ligatures[state.currentLigature]) return;
-        if (!state.isDrawing) return;
-        
-        const { x, y } = getCanvasPixelCoords(e, ligatureCanvas);
-        const ligature = fontData.ligatures[state.currentLigature];
-        
-        if (state.currentTool === 'line' || state.currentTool === 'rect') {
-            return;
-        }
-        
-        applyTool(x, y, ligature, ligatureCanvas);
-        renderLigatureCanvas();
-        renderPreview();
-    }
-
-    function handleLigatureMouseUp() {
-        state.isDrawing = false;
-    }
-
     function flipHorizontal() {
-        const glyph = getGlyph(state.currentCodePoint);
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
         glyph.pixels = glyph.pixels.map(row => row.split('').reverse().join(''));
         glyph.modified = true;
         saveHistory();
-        renderGlyphCanvas();
-        renderCharsetGrid();
+        renderEditor();
+        renderGlyphSet();
         renderPreview();
     }
 
     function flipVertical() {
-        const glyph = getGlyph(state.currentCodePoint);
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
         glyph.pixels.reverse();
         glyph.modified = true;
         saveHistory();
-        renderGlyphCanvas();
-        renderCharsetGrid();
-        renderPreview();
-    }
-
-    function flipDiagonal() {
-        const glyph = getGlyph(state.currentCodePoint);
-        const newPixels = [];
-        for (let x = 0; x < glyph.width; x++) {
-            let newRow = '';
-            for (let y = 0; y < glyph.height; y++) {
-                newRow += glyph.pixels[y][x];
-            }
-            newPixels.push(newRow);
-        }
-        glyph.pixels = newPixels;
-        const temp = glyph.width;
-        glyph.width = glyph.height;
-        glyph.height = temp;
-        glyph.modified = true;
-        saveHistory();
-        renderGlyphCanvas();
-        renderCharsetGrid();
+        renderEditor();
+        renderGlyphSet();
         renderPreview();
     }
 
     function moveGlyph(direction) {
-        const glyph = getGlyph(state.currentCodePoint);
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
         const w = glyph.width;
         const h = glyph.height;
         
@@ -542,18 +602,19 @@ const PixelFontEditor = (function() {
         
         glyph.modified = true;
         saveHistory();
-        renderGlyphCanvas();
-        renderCharsetGrid();
+        renderEditor();
+        renderGlyphSet();
         renderPreview();
     }
 
     function clearGlyph() {
-        const glyph = getGlyph(state.currentCodePoint);
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
         glyph.pixels = glyph.pixels.map(() => '0'.repeat(glyph.width));
         glyph.modified = true;
         saveHistory();
-        renderGlyphCanvas();
-        renderCharsetGrid();
+        renderEditor();
+        renderGlyphSet();
         renderPreview();
     }
 
@@ -573,89 +634,180 @@ const PixelFontEditor = (function() {
         }
     }
 
-    function drawCharsetThumbnail(canvas, codePoint) {
+    function drawCharsetThumbnail(canvasEl, codePoint) {
         const glyph = getGlyph(codePoint);
-        const ctx = canvas.getContext('2d');
+        const ctx2d = canvasEl.getContext('2d');
         const scale = 2;
         const width = glyph.width * scale;
         const height = glyph.height * scale;
         
-        canvas.width = width;
-        canvas.height = height;
+        canvasEl.width = width;
+        canvasEl.height = height;
         
-        ctx.fillStyle = '#1e1e3a';
-        ctx.fillRect(0, 0, width, height);
+        ctx2d.fillStyle = '#1e1e3a';
+        ctx2d.fillRect(0, 0, width, height);
         
-        drawGlyphToCanvas(ctx, glyph, 0, 0, scale, '#ffffff');
+        drawGlyphToCanvas(ctx2d, glyph, 0, 0, scale, '#ffffff');
     }
 
-    function renderCharsetGrid() {
-        const grid = document.getElementById('charset-grid');
+    function renderAll() {
+        renderEditor();
+        renderGlyphSet();
+        renderPreview();
+        updateCurrentCharInfo();
+        renderKerningList();
+        renderLigatureList();
+        updateSettingsForm();
+    }
+
+    function renderEditor() {
+        if (state.currentTab === 'ligatures') {
+            renderGlyphCanvas();
+        } else {
+            renderGlyphCanvas();
+        }
+    }
+
+    function updateTabs() {
+        const tabs = document.querySelectorAll('.tab-btn');
+        tabs.forEach(tab => tab.classList.remove('active'));
+        if (state.currentTab === 'glyphs') {
+            document.getElementById('btn-tab-glyphs').classList.add('active');
+        } else {
+            document.getElementById('btn-tab-ligatures').classList.add('active');
+        }
+    }
+
+    function renderGlyphSet() {
+        const font = getCurrentFont();
+        const grid = document.getElementById('glyph-set');
+        if (!grid) return;
         grid.innerHTML = '';
         
-        const codePoints = Object.keys(fontData.glyphs)
-            .map(Number)
-            .sort((a, b) => a - b);
+        let codePoints;
+        if (state.currentTab === 'ligatures') {
+            codePoints = Object.keys(font.ligatures).sort();
+        } else {
+            codePoints = Object.keys(font.glyphs)
+                .map(Number)
+                .sort((a, b) => a - b);
+        }
         
-        const filtered = state.searchFilter 
+        const filtered = state.glyphFilter 
             ? codePoints.filter(cp => {
+                if (state.currentTab === 'ligatures') {
+                    return cp.includes(state.glyphFilter);
+                }
                 const char = String.fromCodePoint(cp);
                 const hex = 'U+' + cp.toString(16).toUpperCase().padStart(4, '0');
-                return char.includes(state.searchFilter) || hex.includes(state.searchFilter.toUpperCase());
+                return char.includes(state.glyphFilter) || hex.includes(state.glyphFilter.toUpperCase());
             })
             : codePoints;
         
-        filtered.forEach(codePoint => {
-            const char = String.fromCodePoint(codePoint);
-            const glyph = getGlyph(codePoint);
-            const isEmpty = isGlyphEmpty(glyph);
+        filtered.forEach(item => {
+            const div = document.createElement('div');
+            div.className = 'charset-item';
             
-            const item = document.createElement('div');
-            item.className = 'charset-item';
-            if (codePoint === state.currentCodePoint) item.classList.add('active');
-            if (isEmpty) item.classList.add('empty');
-            item.dataset.codePoint = codePoint;
-            
-            const canvas = document.createElement('canvas');
-            canvas.className = 'charset-canvas';
-            
-            const label = document.createElement('div');
-            label.className = 'charset-label';
-            label.textContent = 'U+' + codePoint.toString(16).toUpperCase().padStart(4, '0');
-            
-            item.appendChild(canvas);
-            item.appendChild(label);
-            
-            item.addEventListener('click', () => {
-                state.currentCodePoint = codePoint;
-                clearHistory();
-                renderGlyphCanvas();
-                renderCharsetGrid();
-                updateCurrentCharInfo();
-            });
-            
-            item.addEventListener('contextmenu', (e) => {
-                e.preventDefault();
-                showContextMenu(e.clientX, e.clientY, codePoint);
-            });
-            
-            grid.appendChild(item);
-            drawCharsetThumbnail(canvas, codePoint);
+            if (state.currentTab === 'glyphs') {
+                const codePoint = item;
+                const glyph = getGlyph(codePoint);
+                const isEmpty = isGlyphEmpty(glyph);
+                
+                if (codePoint === state.currentCodePoint) div.classList.add('active');
+                if (isEmpty) div.classList.add('empty');
+                div.dataset.codePoint = codePoint;
+                
+                const canvasEl = document.createElement('canvas');
+                canvasEl.className = 'charset-canvas';
+                
+                const label = document.createElement('div');
+                label.className = 'charset-label';
+                label.textContent = 'U+' + codePoint.toString(16).toUpperCase().padStart(4, '0');
+                
+                div.appendChild(canvasEl);
+                div.appendChild(label);
+                
+                div.addEventListener('click', () => {
+                    state.currentCodePoint = codePoint;
+                    state.currentTab = 'glyphs';
+                    clearHistory();
+                    updateTabs();
+                    renderEditor();
+                    renderGlyphSet();
+                    updateCurrentCharInfo();
+                });
+                
+                div.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    showGlyphContextMenu(e.clientX, e.clientY, codePoint);
+                });
+                
+                grid.appendChild(div);
+                drawCharsetThumbnail(canvasEl, codePoint);
+            } else {
+                const ligKey = item;
+                if (ligKey === state.currentLigature) div.classList.add('active');
+                
+                const nameSpan = document.createElement('span');
+                nameSpan.className = 'ligature-name';
+                nameSpan.textContent = ligKey;
+                nameSpan.style.fontSize = '12px';
+                nameSpan.style.padding = '8px';
+                
+                div.appendChild(nameSpan);
+                
+                div.addEventListener('click', () => {
+                    state.currentLigature = ligKey;
+                    state.currentTab = 'ligatures';
+                    clearHistory();
+                    updateTabs();
+                    renderEditor();
+                    renderGlyphSet();
+                });
+                
+                grid.appendChild(div);
+            }
         });
     }
 
+    function showLigatureList() {
+        state.currentTab = 'ligatures';
+        renderGlyphSet();
+    }
+
     function updateCurrentCharInfo() {
-        const char = String.fromCodePoint(state.currentCodePoint);
-        document.getElementById('current-char-display').textContent = char;
-        document.getElementById('current-char-code').textContent = 
-            'U+' + state.currentCodePoint.toString(16).toUpperCase().padStart(4, '0');
+        if (state.currentTab === 'ligatures' && state.currentLigature) {
+            document.getElementById('current-char-display').textContent = state.currentLigature;
+            document.getElementById('current-char-code').textContent = '连字';
+        } else {
+            const char = String.fromCodePoint(state.currentCodePoint);
+            document.getElementById('current-char-display').textContent = char;
+            document.getElementById('current-char-code').textContent = 
+                'U+' + state.currentCodePoint.toString(16).toUpperCase().padStart(4, '0');
+        }
+    }
+
+    function showGlyphContextMenu(x, y, codePoint) {
+        state.contextMenuCodePoint = codePoint;
+        const items = [
+            { icon: '⎘', label: '复制字形', action: () => copyGlyph(codePoint) },
+            { icon: '⎙', label: '粘贴字形', action: () => pasteGlyph(codePoint) },
+            { divider: true },
+            { icon: '✕', label: '删除字形', danger: true, action: () => deleteGlyph(codePoint) }
+        ];
+        showContextMenu(x, y, items);
     }
 
     function processTextForRendering(text) {
+        const font = getCurrentFont();
+        return processTextWithFont(text, font);
+    }
+
+    function processTextWithFont(text, font) {
         const result = [];
         let i = 0;
         
-        const ligatureKeys = Object.keys(fontData.ligatures)
+        const ligatureKeys = Object.keys(font.ligatures)
             .sort((a, b) => b.length - a.length);
         
         while (i < text.length) {
@@ -666,7 +818,7 @@ const PixelFontEditor = (function() {
                     result.push({
                         type: 'ligature',
                         chars: ligKey,
-                        glyph: fontData.ligatures[ligKey]
+                        glyph: font.ligatures[ligKey]
                     });
                     i += ligKey.length;
                     matched = true;
@@ -680,7 +832,7 @@ const PixelFontEditor = (function() {
                     type: 'char',
                     char: text[i],
                     codePoint: codePoint,
-                    glyph: fontData.glyphs[codePoint] || null
+                    glyph: font.glyphs[codePoint] || createEmptyGlyph(font.metadata.glyphWidth, font.metadata.glyphHeight)
                 });
                 i++;
             }
@@ -689,11 +841,47 @@ const PixelFontEditor = (function() {
         return result;
     }
 
-    function exportPNG() {
-        const link = document.createElement('a');
-        link.download = `${fontData.metadata.name || 'pixel-font'}.png`;
-        link.href = previewCanvas.toDataURL('image/png');
-        link.click();
+    function parseFontTags(text) {
+        const segments = [];
+        let currentFontName = getCurrentFont().metadata.name;
+        let currentText = '';
+        let i = 0;
+        
+        while (i < text.length) {
+            if (text.substring(i, i + 6) === '(font:') {
+                if (currentText) {
+                    segments.push({
+                        fontName: currentFontName,
+                        text: currentText
+                    });
+                    currentText = '';
+                }
+                
+                const endIndex = text.indexOf(')', i);
+                if (endIndex !== -1) {
+                    const fontName = text.substring(i + 6, endIndex).trim();
+                    if (getFontByName(fontName)) {
+                        currentFontName = fontName;
+                    }
+                    i = endIndex + 1;
+                } else {
+                    currentText += text[i];
+                    i++;
+                }
+            } else {
+                currentText += text[i];
+                i++;
+            }
+        }
+        
+        if (currentText) {
+            segments.push({
+                fontName: currentFontName,
+                text: currentText
+            });
+        }
+        
+        return segments;
     }
 
     function hexToRgb(hex) {
@@ -723,22 +911,29 @@ const PixelFontEditor = (function() {
     }
 
     function getTextLayout(text, scale) {
-        const processed = processTextForRendering(text);
-        const glyphHeight = fontData.metadata.glyphHeight;
-        const defaultSpacing = fontData.metadata.defaultSpacing;
-        const lineWidth = parseInt(document.getElementById('preview-linewidth').value);
-        const lineSpacing = parseInt(document.getElementById('preview-linespacing').value);
+        const segments = parseFontTags(text);
+        const lineWidth = previewState.lineWidth;
+        const lineSpacing = previewState.lineSpacing;
 
         const lines = [];
         let currentLine = [];
         let currentWidth = 0;
         let currentWord = [];
         let currentWordWidth = 0;
+        let maxGlyphHeight = 0;
+
+        segments.forEach(segment => {
+            const font = getFontByName(segment.fontName);
+            if (!font) return;
+            if (font.metadata.glyphHeight > maxGlyphHeight) {
+                maxGlyphHeight = font.metadata.glyphHeight;
+            }
+        });
 
         function flushWord() {
             if (currentWord.length > 0) {
                 if (currentWidth + currentWordWidth > lineWidth && currentLine.length > 0) {
-                    lines.push(currentLine);
+                    lines.push({ chars: currentLine, height: maxGlyphHeight });
                     currentLine = [];
                     currentWidth = 0;
                 }
@@ -749,44 +944,52 @@ const PixelFontEditor = (function() {
             }
         }
 
-        for (let i = 0; i < processed.length; i++) {
-            const item = processed[i];
-            let itemWidth;
-            let glyph;
+        segments.forEach(segment => {
+            const font = getFontByName(segment.fontName);
+            if (!font) return;
 
-            if (item.type === 'ligature') {
-                glyph = item.glyph;
-                itemWidth = item.glyph.width + defaultSpacing;
-            } else {
-                glyph = item.glyph || createEmptyGlyph(fontData.metadata.glyphWidth, fontData.metadata.glyphHeight);
-                let kerningOffset = 0;
-                if (i > 0 && processed[i-1].type === 'char') {
-                    const prevChar = processed[i-1].char;
-                    const kerningKey = prevChar + item.char;
-                    kerningOffset = fontData.kerning[kerningKey] || 0;
-                }
-                itemWidth = glyph.width + defaultSpacing + kerningOffset;
-            }
+            const processed = processTextWithFont(segment.text, font);
+            const defaultSpacing = font.metadata.defaultSpacing;
 
-            if (item.type === 'char' && (item.char === ' ' || item.char === '\n')) {
-                flushWord();
-                if (item.char === '\n') {
-                    lines.push(currentLine);
-                    currentLine = [];
-                    currentWidth = 0;
+            for (let i = 0; i < processed.length; i++) {
+                const item = processed[i];
+                let itemWidth;
+                let glyph;
+
+                if (item.type === 'ligature') {
+                    glyph = item.glyph;
+                    itemWidth = item.glyph.width + defaultSpacing;
                 } else {
-                    currentLine.push({ ...item, glyph, width: itemWidth, x: currentWidth });
-                    currentWidth += itemWidth;
+                    glyph = item.glyph || createEmptyGlyph(font.metadata.glyphWidth, font.metadata.glyphHeight);
+                    let kerningOffset = 0;
+                    if (i > 0 && processed[i-1].type === 'char') {
+                        const prevChar = processed[i-1].char;
+                        const kerningKey = prevChar + item.char;
+                        kerningOffset = font.kerning[kerningKey] || 0;
+                    }
+                    itemWidth = glyph.width + defaultSpacing + kerningOffset;
                 }
-            } else {
-                currentWord.push({ ...item, glyph, width: itemWidth, x: 0 });
-                currentWordWidth += itemWidth;
+
+                if (item.type === 'char' && (item.char === ' ' || item.char === '\n')) {
+                    flushWord();
+                    if (item.char === '\n') {
+                        lines.push({ chars: currentLine, height: maxGlyphHeight });
+                        currentLine = [];
+                        currentWidth = 0;
+                    } else {
+                        currentLine.push({ ...item, glyph, width: itemWidth, x: currentWidth, fontName: segment.fontName });
+                        currentWidth += itemWidth * scale;
+                    }
+                } else {
+                    currentWord.push({ ...item, glyph, width: itemWidth, x: 0, fontName: segment.fontName });
+                    currentWordWidth += itemWidth * scale;
+                }
             }
-        }
+        });
 
         flushWord();
         if (currentLine.length > 0) {
-            lines.push(currentLine);
+            lines.push({ chars: currentLine, height: maxGlyphHeight });
         }
 
         const layoutLines = [];
@@ -794,26 +997,33 @@ const PixelFontEditor = (function() {
         lines.forEach(line => {
             let x = 0;
             const layoutChars = [];
-            line.forEach(item => {
-                if (item.type === 'char') {
-                    let kerningOffset = 0;
-                    if (layoutChars.length > 0 && line[layoutChars.length - 1].type === 'char') {
-                        const prevItem = line[layoutChars.length - 1];
+            
+            line.chars.forEach((item, idx) => {
+                const font = getFontByName(item.fontName);
+                if (!font) return;
+
+                if (item.type === 'char' && idx > 0) {
+                    const prevItem = line.chars[idx - 1];
+                    if (prevItem.type === 'char' && prevItem.fontName === item.fontName) {
                         const kerningKey = prevItem.char + item.char;
-                        kerningOffset = fontData.kerning[kerningKey] || 0;
+                        const kerningOffset = font.kerning[kerningKey] || 0;
+                        x += kerningOffset * scale;
                     }
-                    x += kerningOffset * scale;
                 }
+
+                const baselineOffset = (line.height - font.metadata.glyphHeight) * scale;
+                
                 layoutChars.push({
                     ...item,
                     x: x,
-                    y: y,
-                    glyph: item.glyph
+                    y: y + baselineOffset,
+                    glyph: item.glyph,
+                    fontName: item.fontName
                 });
                 x += item.width * scale;
             });
-            layoutLines.push({ chars: layoutChars, y: y, width: x });
-            y += (glyphHeight + lineSpacing) * scale;
+            layoutLines.push({ chars: layoutChars, y: y, width: x, height: line.height });
+            y += (line.height + lineSpacing) * scale;
         });
 
         return {
@@ -840,255 +1050,122 @@ const PixelFontEditor = (function() {
         }
     }
 
-    function drawGlyphWithOpacity(targetCtx, glyph, x, y, scale, color, opacity) {
-        const rgb = hexToRgb(color);
-        targetCtx.fillStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${opacity})`;
-        for (let gy = 0; gy < glyph.height; gy++) {
-            for (let gx = 0; gx < glyph.width; gx++) {
-                if (getPixel(glyph, gx, gy)) {
-                    targetCtx.fillRect(
-                        x + gx * scale,
-                        y + gy * scale,
-                        scale,
-                        scale
-                    );
-                }
-            }
-        }
-    }
-
-    function renderShadowEffect(ctx, layout, scale, params) {
-        const { offsetX, offsetY, color, opacity } = params;
-        layout.lines.forEach(line => {
-            line.chars.forEach(char => {
-                if (!char.glyph) return;
-                drawGlyphWithOpacity(
-                    ctx,
-                    char.glyph,
-                    char.x + offsetX * scale,
-                    char.y + offsetY * scale,
-                    scale,
-                    color,
-                    opacity
-                );
-            });
-        });
-    }
-
-    function renderStrokeEffect(ctx, layout, scale, params) {
-        const { width, color } = params;
-        const directions = [];
-        for (let dy = -width; dy <= width; dy++) {
-            for (let dx = -width; dx <= width; dx++) {
-                if (dx !== 0 || dy !== 0) {
-                    directions.push({ dx, dy });
-                }
-            }
-        }
-
-        layout.lines.forEach(line => {
-            line.chars.forEach(char => {
-                if (!char.glyph) return;
-                directions.forEach(dir => {
-                    drawGlyphWithColor(
-                        ctx,
-                        char.glyph,
-                        char.x + dir.dx * scale,
-                        char.y + dir.dy * scale,
-                        scale,
-                        color
-                    );
-                });
-            });
-        });
-    }
-
-    function renderGradientEffect(ctx, layout, scale, params, charColors) {
-        const { direction, startColor, endColor } = params;
-
-        layout.lines.forEach((line, lineIdx) => {
-            line.chars.forEach((char, charIdx) => {
-                if (!char.glyph) return;
-                const glyph = char.glyph;
-
-                for (let gy = 0; gy < glyph.height; gy++) {
-                    for (let gx = 0; gx < glyph.width; gx++) {
-                        if (getPixel(glyph, gx, gy)) {
-                            let t;
-                            if (direction === 'vertical') {
-                                t = glyph.height > 1 ? gy / (glyph.height - 1) : 0;
-                            } else {
-                                t = glyph.width > 1 ? gx / (glyph.width - 1) : 0;
-                            }
-                            const color = lerpColor(startColor, endColor, t);
-                            charColors[lineIdx][charIdx][gy][gx] = color;
-                        }
-                    }
-                }
-            });
-        });
-    }
-
-    function applyWaveEffect(layout, scale, params, frame) {
-        const { amplitude, frequency } = params;
+    function applyWaveEffect(layout, scale, frame) {
+        const amplitude = previewState.waveAmp;
+        const speed = previewState.waveSpeed;
+        const length = previewState.waveLength;
         let charIndex = 0;
 
         layout.lines.forEach(line => {
             line.chars.forEach(char => {
-                const offset = amplitude * scale * Math.sin(charIndex * frequency + (frame * Math.PI * 2) / 60);
+                const offset = amplitude * scale * Math.sin(charIndex * (2 * Math.PI / length) + (frame * speed * Math.PI * 2) / 60);
                 char.yOffset = offset;
                 charIndex++;
             });
         });
     }
 
-    function applyTypewriterEffect(layout, scale, params, frame, visibleChars) {
-        const { speed, holdFrames } = params;
-        let totalChars = 0;
-        layout.lines.forEach(line => {
-            totalChars += line.chars.length;
-        });
-
-        const cycleLength = totalChars * speed + holdFrames;
-        const frameInCycle = frame % cycleLength;
-        const charsToShow = Math.min(totalChars, Math.floor(frameInCycle / speed));
-
-        let charIndex = 0;
-        layout.lines.forEach((line, lineIdx) => {
-            line.chars.forEach((char, charIdx) => {
-                visibleChars[lineIdx][charIdx] = charIndex < charsToShow;
-                charIndex++;
-            });
-        });
-    }
-
-    function applyNeonEffect(layout, scale, params, frame, charColors) {
-        const { color1, color2, period } = params;
-        let charIndex = 0;
+    function applyGradientEffect(layout, scale, frame) {
+        const color1 = previewState.gradientColor1;
+        const color2 = previewState.gradientColor2;
+        const speed = previewState.gradientSpeed;
 
         layout.lines.forEach((line, lineIdx) => {
             line.chars.forEach((char, charIdx) => {
                 if (!char.glyph) return;
-                const phaseOffset = (charIndex * Math.PI * 2) / 8;
-                const t = (Math.sin((frame * Math.PI * 2) / period + phaseOffset) + 1) / 2;
-                const color = lerpColor(color1, color2, t);
-
+                char.colors = [];
                 const glyph = char.glyph;
+                const tOffset = (frame * speed) / 60;
+
                 for (let gy = 0; gy < glyph.height; gy++) {
+                    char.colors[gy] = [];
                     for (let gx = 0; gx < glyph.width; gx++) {
                         if (getPixel(glyph, gx, gy)) {
-                            charColors[lineIdx][charIdx][gy][gx] = color;
+                            const t = ((gx + gy) / (glyph.width + glyph.height) + tOffset) % 1;
+                            char.colors[gy][gx] = lerpColor(color1, color2, t);
                         }
                     }
                 }
-                charIndex++;
             });
         });
     }
 
-    function hasDynamicEffects() {
-        return effectsState.effects.some(e => e.enabled && EFFECT_TYPES[e.type].isDynamic);
-    }
+    function applyGlowEffect(ctx, layout, scale) {
+        const intensity = previewState.glowIntensity;
+        const color = previewState.textColor;
+        const rgb = hexToRgb(color);
 
-    function getAnimationCycleFrames(layout) {
-        const dynamicEffects = effectsState.effects.filter(e => e.enabled && EFFECT_TYPES[e.type].isDynamic);
-        if (dynamicEffects.length === 0) return 1;
-
-        const periods = [];
-        let totalChars = 0;
         layout.lines.forEach(line => {
-            totalChars += line.chars.length;
+            line.chars.forEach(char => {
+                if (!char.glyph) return;
+                const glyph = char.glyph;
+                const y = char.y + (char.yOffset || 0);
+
+                for (let dx = -intensity; dx <= intensity; dx++) {
+                    for (let dy = -intensity; dy <= intensity; dy++) {
+                        if (dx === 0 && dy === 0) continue;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist > intensity) continue;
+                        const alpha = (1 - dist / intensity) * 0.3;
+                        ctx.fillStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
+                        for (let gy = 0; gy < glyph.height; gy++) {
+                            for (let gx = 0; gx < glyph.width; gx++) {
+                                if (getPixel(glyph, gx, gy)) {
+                                    ctx.fillRect(
+                                        char.x + gx * scale + dx * scale,
+                                        y + gy * scale + dy * scale,
+                                        scale,
+                                        scale
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            });
         });
-
-        dynamicEffects.forEach(effect => {
-            if (effect.type === 'wave') {
-                periods.push(60);
-            } else if (effect.type === 'neon') {
-                periods.push(effect.params.period);
-            } else if (effect.type === 'typewriter') {
-                const { speed, holdFrames } = effect.params;
-                periods.push(totalChars * speed + holdFrames);
-            }
-        });
-
-        function gcd(a, b) {
-            return b === 0 ? a : gcd(b, a % b);
-        }
-
-        function lcm(a, b) {
-            return (a * b) / gcd(a, b);
-        }
-
-        return periods.reduce((acc, p) => lcm(acc, p), 1);
-    }
-
-    function initCharColors(layout) {
-        return layout.lines.map(line =>
-            line.chars.map(char => {
-                if (!char.glyph) return [];
-                return Array.from({ length: char.glyph.height }, () =>
-                    Array.from({ length: char.glyph.width }, () => '#ffffff')
-                );
-            })
-        );
-    }
-
-    function initVisibleChars(layout) {
-        return layout.lines.map(line =>
-            line.chars.map(() => true)
-        );
     }
 
     function renderFrame(targetCtx, frame, text, scale, targetWidth, targetHeight) {
         const layout = getTextLayout(text, scale);
-        const charColors = initCharColors(layout);
-        const visibleChars = initVisibleChars(layout);
 
         layout.lines.forEach(line => {
             line.chars.forEach(char => {
                 char.yOffset = 0;
+                char.colors = null;
             });
         });
 
-        const enabledEffects = effectsState.effects.filter(e => e.enabled);
+        const effectType = previewState.effectType;
 
-        enabledEffects.forEach(effect => {
-            if (effect.type === 'wave') {
-                applyWaveEffect(layout, scale, effect.params, frame);
-            } else if (effect.type === 'typewriter') {
-                applyTypewriterEffect(layout, scale, effect.params, frame, visibleChars);
-            }
-        });
+        if (effectType === 'wave') {
+            applyWaveEffect(layout, scale, frame);
+        }
 
         targetCtx.fillStyle = '#0f0f23';
         targetCtx.fillRect(0, 0, targetWidth, targetHeight);
 
-        enabledEffects.forEach(effect => {
-            if (effect.type === 'shadow') {
-                renderShadowEffect(targetCtx, layout, scale, effect.params);
-            } else if (effect.type === 'stroke') {
-                renderStrokeEffect(targetCtx, layout, scale, effect.params);
-            }
-        });
+        if (effectType === 'glow') {
+            applyGlowEffect(targetCtx, layout, scale);
+        }
 
-        enabledEffects.forEach(effect => {
-            if (effect.type === 'gradient') {
-                renderGradientEffect(targetCtx, layout, scale, effect.params, charColors);
-            } else if (effect.type === 'neon') {
-                applyNeonEffect(layout, scale, effect.params, frame, charColors);
-            }
-        });
+        if (effectType === 'gradient') {
+            applyGradientEffect(layout, scale, frame);
+        }
 
         layout.lines.forEach((line, lineIdx) => {
             line.chars.forEach((char, charIdx) => {
-                if (!char.glyph || !visibleChars[lineIdx][charIdx]) return;
+                if (!char.glyph) return;
                 const glyph = char.glyph;
                 const y = char.y + (char.yOffset || 0);
 
                 for (let gy = 0; gy < glyph.height; gy++) {
                     for (let gx = 0; gx < glyph.width; gx++) {
                         if (getPixel(glyph, gx, gy)) {
-                            const color = charColors[lineIdx][charIdx][gy][gx] || '#ffffff';
+                            let color = previewState.textColor;
+                            if (char.colors && char.colors[gy] && char.colors[gy][gx]) {
+                                color = char.colors[gy][gx];
+                            }
                             const rgb = hexToRgb(color);
                             targetCtx.fillStyle = `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
                             targetCtx.fillRect(
@@ -1108,11 +1185,11 @@ const PixelFontEditor = (function() {
 
     function renderPreview() {
         const text = document.getElementById('preview-text').value;
-        const scale = parseInt(document.getElementById('preview-scale').value);
+        const scale = previewState.scale;
 
         const layout = getTextLayout(text, scale);
         const padding = 20;
-        const maxEffectOffset = 10;
+        const maxEffectOffset = 20;
         const totalWidth = Math.max(layout.totalWidth + padding * 2, 100);
         const totalHeight = Math.max(layout.totalHeight + padding * 2 + maxEffectOffset * 2, 50);
 
@@ -1122,266 +1199,59 @@ const PixelFontEditor = (function() {
         previewCtx.save();
         previewCtx.translate(padding, padding + maxEffectOffset);
 
-        renderFrame(previewCtx, effectsState.currentFrame, text, scale, totalWidth, totalHeight);
+        renderFrame(previewCtx, previewState.currentFrame, text, scale, totalWidth, totalHeight);
 
         previewCtx.restore();
 
-        document.getElementById('frame-display').textContent = `帧: ${effectsState.currentFrame}`;
-    }
-
-    function addEffect(type) {
-        if (!EFFECT_TYPES[type]) return;
-
-        const effect = {
-            id: Date.now() + Math.random(),
-            type: type,
-            enabled: true,
-            params: { ...EFFECT_TYPES[type].defaultParams }
-        };
-
-        effectsState.effects.push(effect);
-        renderEffectsPanel();
-        resetAnimation();
-    }
-
-    function removeEffect(id) {
-        effectsState.effects = effectsState.effects.filter(e => e.id !== id);
-        renderEffectsPanel();
-        resetAnimation();
-    }
-
-    function toggleEffect(id) {
-        const effect = effectsState.effects.find(e => e.id === id);
-        if (effect) {
-            effect.enabled = !effect.enabled;
-            renderEffectsPanel();
-            resetAnimation();
+        const frameDisplay = document.getElementById('frame-display');
+        if (frameDisplay) {
+            frameDisplay.textContent = `帧: ${previewState.currentFrame}`;
         }
     }
 
-    function updateEffectParam(id, paramName, value) {
-        const effect = effectsState.effects.find(e => e.id === id);
-        if (effect) {
-            effect.params[paramName] = value;
-            renderPreview();
+    function startPreviewAnimation() {
+        if (previewState.animationId) {
+            cancelAnimationFrame(previewState.animationId);
+        }
+        previewState.lastFrameTime = 0;
+        animatePreview();
+    }
+
+    function stopPreviewAnimation() {
+        if (previewState.animationId) {
+            cancelAnimationFrame(previewState.animationId);
+            previewState.animationId = null;
         }
     }
 
-    function reorderEffects(fromIndex, toIndex) {
-        if (fromIndex < 0 || fromIndex >= effectsState.effects.length) return;
-        if (toIndex < 0 || toIndex >= effectsState.effects.length) return;
-
-        const [removed] = effectsState.effects.splice(fromIndex, 1);
-        effectsState.effects.splice(toIndex, 0, removed);
-        renderEffectsPanel();
-        resetAnimation();
-    }
-
-    function renderEffectsPanel() {
-        const container = document.getElementById('effects-list');
-        container.innerHTML = '';
-
-        effectsState.effects.forEach((effect, index) => {
-            const effectType = EFFECT_TYPES[effect.type];
-            const item = document.createElement('div');
-            item.className = 'effect-item';
-            item.dataset.index = index;
-            item.draggable = true;
-
-            let paramsHtml = '';
-            Object.keys(effect.params).forEach(paramName => {
-                const value = effect.params[paramName];
-                let inputHtml = '';
-
-                if (paramName.includes('color') || paramName === 'color') {
-                    inputHtml = `<input type="color" value="${value}" data-param="${paramName}">`;
-                } else if (paramName === 'opacity') {
-                    inputHtml = `
-                        <input type="range" min="0" max="1" step="0.1" value="${value}" data-param="${paramName}">
-                        <span style="font-size:10px;color:var(--text-muted)">${value}</span>
-                    `;
-                } else if (paramName === 'direction') {
-                    inputHtml = `
-                        <select data-param="${paramName}">
-                            <option value="vertical" ${value === 'vertical' ? 'selected' : ''}>垂直</option>
-                            <option value="horizontal" ${value === 'horizontal' ? 'selected' : ''}>水平</option>
-                        </select>
-                    `;
-                } else if (paramName === 'offsetX' || paramName === 'offsetY') {
-                    inputHtml = `
-                        <input type="number" min="1" max="4" step="1" value="${value}" data-param="${paramName}">
-                    `;
-                } else if (paramName === 'width') {
-                    inputHtml = `
-                        <input type="number" min="1" max="2" step="1" value="${value}" data-param="${paramName}">
-                    `;
-                } else if (paramName === 'amplitude') {
-                    inputHtml = `
-                        <input type="number" min="0" max="10" step="0.5" value="${value}" data-param="${paramName}">
-                    `;
-                } else if (paramName === 'frequency') {
-                    inputHtml = `
-                        <input type="number" min="0.1" max="2" step="0.1" value="${value}" data-param="${paramName}">
-                    `;
-                } else if (paramName === 'speed') {
-                    inputHtml = `
-                        <input type="number" min="1" max="10" step="1" value="${value}" data-param="${paramName}">
-                    `;
-                } else if (paramName === 'holdFrames' || paramName === 'period') {
-                    inputHtml = `
-                        <input type="number" min="1" max="120" step="1" value="${value}" data-param="${paramName}">
-                    `;
-                } else {
-                    inputHtml = `<input type="number" value="${value}" data-param="${paramName}">`;
-                }
-
-                const labelMap = {
-                    offsetX: 'X偏移',
-                    offsetY: 'Y偏移',
-                    color: '颜色',
-                    color1: '颜色1',
-                    color2: '颜色2',
-                    opacity: '透明度',
-                    width: '宽度',
-                    direction: '方向',
-                    startColor: '起始色',
-                    endColor: '结束色',
-                    amplitude: '振幅',
-                    frequency: '频率',
-                    speed: '速度',
-                    holdFrames: '停留帧',
-                    period: '周期'
-                };
-
-                paramsHtml += `
-                    <div class="effect-param">
-                        <label>${labelMap[paramName] || paramName}</label>
-                        ${inputHtml}
-                    </div>
-                `;
-            });
-
-            item.innerHTML = `
-                <div class="effect-header">
-                    <span class="effect-drag-handle">⋮⋮</span>
-                    <span class="effect-name">${effectType.name}${effectType.isDynamic ? ' ⚡' : ''}</span>
-                    <div class="effect-toggle ${effect.enabled ? 'active' : ''}" data-toggle></div>
-                    <button class="effect-delete" data-delete>×</button>
-                </div>
-                <div class="effect-params">
-                    ${paramsHtml}
-                </div>
-            `;
-
-            item.addEventListener('dragstart', (e) => {
-                effectsState.draggedEffectId = effect.id;
-                item.classList.add('dragging');
-                e.dataTransfer.effectAllowed = 'move';
-            });
-
-            item.addEventListener('dragend', () => {
-                item.classList.remove('dragging');
-                effectsState.draggedEffectId = null;
-                document.querySelectorAll('.effect-item').forEach(el => {
-                    el.classList.remove('drag-over');
-                });
-            });
-
-            item.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                if (effectsState.draggedEffectId !== effect.id) {
-                    item.classList.add('drag-over');
-                }
-            });
-
-            item.addEventListener('dragleave', () => {
-                item.classList.remove('drag-over');
-            });
-
-            item.addEventListener('drop', (e) => {
-                e.preventDefault();
-                item.classList.remove('drag-over');
-                if (effectsState.draggedEffectId !== null && effectsState.draggedEffectId !== effect.id) {
-                    const fromIndex = effectsState.effects.findIndex(e => e.id === effectsState.draggedEffectId);
-                    const toIndex = parseInt(item.dataset.index);
-                    reorderEffects(fromIndex, toIndex);
-                }
-            });
-
-            item.querySelector('[data-toggle]').addEventListener('click', () => {
-                toggleEffect(effect.id);
-            });
-
-            item.querySelector('[data-delete]').addEventListener('click', () => {
-                removeEffect(effect.id);
-            });
-
-            item.querySelectorAll('[data-param]').forEach(input => {
-                const paramName = input.dataset.param;
-                input.addEventListener('input', (e) => {
-                    let value = e.target.value;
-                    if (input.type === 'number' || input.type === 'range') {
-                        value = parseFloat(value);
-                    }
-                    updateEffectParam(effect.id, paramName, value);
-                });
-            });
-
-            container.appendChild(item);
-        });
-    }
-
-    function resetAnimation() {
-        effectsState.currentFrame = 0;
-        if (!hasDynamicEffects()) {
-            stopAnimation();
-            renderPreview();
-        } else {
-            startAnimation();
-        }
-    }
-
-    function startAnimation() {
-        if (effectsState.animationId) {
-            cancelAnimationFrame(effectsState.animationId);
-        }
-        effectsState.lastFrameTime = 0;
-        animate();
-    }
-
-    function stopAnimation() {
-        if (effectsState.animationId) {
-            cancelAnimationFrame(effectsState.animationId);
-            effectsState.animationId = null;
-        }
-    }
-
-    function animate(timestamp) {
-        if (!effectsState.isPlaying || !hasDynamicEffects()) {
-            effectsState.animationId = requestAnimationFrame(animate);
+    function animatePreview(timestamp) {
+        if (!previewState.isPlaying) {
+            previewState.animationId = requestAnimationFrame(animatePreview);
             return;
         }
 
-        if (!effectsState.lastFrameTime) {
-            effectsState.lastFrameTime = timestamp;
+        if (!previewState.lastFrameTime) {
+            previewState.lastFrameTime = timestamp;
         }
 
-        const frameInterval = 1000 / effectsState.fps;
-        const elapsed = timestamp - effectsState.lastFrameTime;
+        const frameInterval = 1000 / previewState.fps;
+        const elapsed = timestamp - previewState.lastFrameTime;
 
         if (elapsed >= frameInterval) {
-            effectsState.currentFrame++;
-            effectsState.lastFrameTime = timestamp - (elapsed % frameInterval);
+            previewState.currentFrame++;
+            previewState.lastFrameTime = timestamp - (elapsed % frameInterval);
             renderPreview();
         }
 
-        effectsState.animationId = requestAnimationFrame(animate);
+        previewState.animationId = requestAnimationFrame(animatePreview);
     }
 
     function togglePlayPause() {
-        effectsState.isPlaying = !effectsState.isPlaying;
+        previewState.isPlaying = !previewState.isPlaying;
         const btn = document.getElementById('btn-play-pause');
-        btn.textContent = effectsState.isPlaying ? '⏸ 暂停' : '▶ 播放';
+        if (btn) {
+            btn.textContent = previewState.isPlaying ? '⏸ 暂停' : '▶ 播放';
+        }
     }
 
     class GIFEncoder {
@@ -1597,17 +1467,23 @@ const PixelFontEditor = (function() {
     }
 
     async function exportGIF() {
+        if (typeof GIFEncoder === 'undefined') {
+            alert('GIF 导出功能需要 gif.js 库支持。请在项目中添加 gif.js 文件。');
+            return;
+        }
+        
         const text = document.getElementById('preview-text').value;
-        const scale = parseInt(document.getElementById('preview-scale').value);
-        const fps = parseInt(document.getElementById('preview-fps').value);
+        const scale = previewState.scale;
+        const fps = previewState.fps;
+        const font = getCurrentFont();
 
         const layout = getTextLayout(text, scale);
         const padding = 20;
-        const maxEffectOffset = 10;
+        const maxEffectOffset = 20;
         const totalWidth = Math.max(layout.totalWidth + padding * 2, 100);
         const totalHeight = Math.max(layout.totalHeight + padding * 2 + maxEffectOffset * 2, 50);
 
-        const totalFrames = getAnimationCycleFrames(layout);
+        const totalFrames = 60;
 
         const offscreenCanvas = document.createElement('canvas');
         offscreenCanvas.width = totalWidth;
@@ -1643,7 +1519,7 @@ const PixelFontEditor = (function() {
         const url = URL.createObjectURL(blob);
 
         const link = document.createElement('a');
-        link.download = `${fontData.metadata.name || 'pixel-text'}-animation.gif`;
+        link.download = `${font.metadata.name || 'pixel-text'}-animation.gif`;
         link.href = url;
         link.click();
 
@@ -1655,34 +1531,44 @@ const PixelFontEditor = (function() {
 
     function exportJSON() {
         const exportData = {
-            metadata: { ...fontData.metadata },
-            glyphs: {},
-            kerning: { ...fontData.kerning },
-            ligatures: {}
+            version: 2,
+            fonts: []
         };
-        
-        Object.keys(fontData.glyphs).forEach(cp => {
-            const glyph = fontData.glyphs[cp];
-            exportData.glyphs[cp] = {
-                width: glyph.width,
-                height: glyph.height,
-                pixels: glyph.pixels
+
+        workspace.fonts.forEach(font => {
+            const fontExport = {
+                metadata: { ...font.metadata },
+                glyphs: {},
+                kerning: { ...font.kerning },
+                ligatures: {}
             };
-        });
-        
-        Object.keys(fontData.ligatures).forEach(key => {
-            const lig = fontData.ligatures[key];
-            exportData.ligatures[key] = {
-                width: lig.width,
-                height: lig.height,
-                pixels: lig.pixels
-            };
+            
+            Object.keys(font.glyphs).forEach(cp => {
+                const g = font.glyphs[cp];
+                fontExport.glyphs[cp] = {
+                    width: g.width,
+                    height: g.height,
+                    pixels: g.pixels
+                };
+            });
+            
+            Object.keys(font.ligatures).forEach(key => {
+                const l = font.ligatures[key];
+                fontExport.ligatures[key] = {
+                    width: l.width,
+                    height: l.height,
+                    pixels: l.pixels
+                };
+            });
+
+            exportData.fonts.push(fontExport);
         });
         
         const json = JSON.stringify(exportData, null, 2);
         const blob = new Blob([json], { type: 'application/json' });
         const link = document.createElement('a');
-        link.download = `${fontData.metadata.name || 'pixel-font'}.json`;
+        const currentFont = getCurrentFont();
+        link.download = `${currentFont.metadata.name || 'pixel-font-workspace'}.json`;
         link.href = URL.createObjectURL(blob);
         link.click();
     }
@@ -1693,46 +1579,82 @@ const PixelFontEditor = (function() {
             try {
                 const data = JSON.parse(e.target.result);
                 
-                if (data.metadata) {
-                    fontData.metadata = { ...fontData.metadata, ...data.metadata };
-                }
-                
-                fontData.glyphs = {};
-                if (data.glyphs) {
-                    Object.keys(data.glyphs).forEach(cp => {
-                        const g = data.glyphs[cp];
-                        fontData.glyphs[cp] = {
-                            width: g.width,
-                            height: g.height,
-                            pixels: [...g.pixels],
-                            modified: false
+                if (data.fonts && Array.isArray(data.fonts)) {
+                    workspace.fonts = [];
+                    data.fonts.forEach(fontData => {
+                        const font = {
+                            metadata: { ...fontData.metadata },
+                            glyphs: {},
+                            kerning: fontData.kerning || {},
+                            ligatures: {}
                         };
+                        
+                        if (fontData.glyphs) {
+                            Object.keys(fontData.glyphs).forEach(cp => {
+                                const g = fontData.glyphs[cp];
+                                font.glyphs[cp] = {
+                                    width: g.width,
+                                    height: g.height,
+                                    pixels: [...g.pixels],
+                                    modified: false
+                                };
+                            });
+                        }
+                        
+                        if (fontData.ligatures) {
+                            Object.keys(fontData.ligatures).forEach(key => {
+                                const l = fontData.ligatures[key];
+                                font.ligatures[key] = {
+                                    width: l.width,
+                                    height: l.height,
+                                    pixels: [...l.pixels],
+                                    modified: false
+                                };
+                            });
+                        }
+                        
+                        workspace.fonts.push(font);
                     });
+                    workspace.currentFontIndex = 0;
+                } else {
+                    const font = {
+                        metadata: { ...data.metadata },
+                        glyphs: {},
+                        kerning: data.kerning || {},
+                        ligatures: {}
+                    };
+                    
+                    if (data.glyphs) {
+                        Object.keys(data.glyphs).forEach(cp => {
+                            const g = data.glyphs[cp];
+                            font.glyphs[cp] = {
+                                width: g.width,
+                                height: g.height,
+                                pixels: [...g.pixels],
+                                modified: false
+                            };
+                        });
+                    }
+                    
+                    if (data.ligatures) {
+                        Object.keys(data.ligatures).forEach(key => {
+                            const l = data.ligatures[key];
+                            font.ligatures[key] = {
+                                width: l.width,
+                                height: l.height,
+                                pixels: [...l.pixels],
+                                modified: false
+                            };
+                        });
+                    }
+                    
+                    workspace.fonts = [font];
+                    workspace.currentFontIndex = 0;
                 }
                 
-                fontData.kerning = data.kerning || {};
-                
-                fontData.ligatures = {};
-                if (data.ligatures) {
-                    Object.keys(data.ligatures).forEach(key => {
-                        const l = data.ligatures[key];
-                        fontData.ligatures[key] = {
-                            width: l.width,
-                            height: l.height,
-                            pixels: [...l.pixels],
-                            modified: false
-                        };
-                    });
-                }
-                
-                updateSettingsForm();
                 clearHistory();
-                renderGlyphCanvas();
-                renderCharsetGrid();
-                renderPreview();
-                renderKerningList();
-                renderLigatureList();
-                updateCurrentCharInfo();
+                renderAll();
+                renderFontSelector();
                 
                 alert('字体导入成功！');
             } catch (err) {
@@ -1743,8 +1665,10 @@ const PixelFontEditor = (function() {
     }
 
     function exportBDF() {
+        const font = getCurrentFont();
+        const { metadata, glyphs, kerning } = font;
+        
         const lines = [];
-        const { metadata, glyphs, kerning } = fontData;
         
         lines.push('STARTFONT 2.1');
         lines.push(`FONT ${metadata.name || 'PIXEL-FONT'}`);
@@ -1816,1196 +1740,1296 @@ const PixelFontEditor = (function() {
         document.getElementById(id).classList.remove('active');
     }
 
-    function showContextMenu(x, y, codePoint) {
-        state.contextMenuCodePoint = codePoint;
-        const menu = document.getElementById('glyph-context-menu');
+    function showContextMenu(x, y, items) {
+        hideContextMenu();
+        
+        const menu = document.createElement('div');
+        menu.id = 'context-menu';
+        menu.className = 'context-menu';
         menu.style.left = x + 'px';
         menu.style.top = y + 'px';
-        menu.classList.add('active');
+        
+        items.forEach(item => {
+            if (item.divider) {
+                const divider = document.createElement('div');
+                divider.className = 'context-menu-divider';
+                menu.appendChild(divider);
+                return;
+            }
+            
+            const menuItem = document.createElement('div');
+            menuItem.className = 'context-menu-item';
+            if (item.danger) menuItem.classList.add('danger');
+            if (item.disabled) menuItem.classList.add('disabled');
+            
+            const icon = document.createElement('span');
+            icon.className = 'context-menu-icon';
+            icon.textContent = item.icon || '';
+            
+            const label = document.createElement('span');
+            label.className = 'context-menu-label';
+            label.textContent = item.label;
+            
+            menuItem.appendChild(icon);
+            menuItem.appendChild(label);
+            
+            if (!item.disabled) {
+                menuItem.onclick = (e) => {
+                    e.stopPropagation();
+                    hideContextMenu();
+                    if (item.action) item.action();
+                };
+            }
+            
+            menu.appendChild(menuItem);
+        });
+        
+        document.body.appendChild(menu);
+        
+        setTimeout(() => {
+            const rect = menu.getBoundingClientRect();
+            if (rect.right > window.innerWidth) {
+                menu.style.left = (window.innerWidth - rect.width - 10) + 'px';
+            }
+            if (rect.bottom > window.innerHeight) {
+                menu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+            }
+            menu.classList.add('active');
+        }, 0);
     }
 
     function hideContextMenu() {
-        document.getElementById('glyph-context-menu').classList.remove('active');
-        state.contextMenuCodePoint = null;
+        const existing = document.getElementById('context-menu');
+        if (existing) existing.remove();
+    }
+
+    function openSettings(tab) {
+        const font = getCurrentFont();
+        document.getElementById('setting-glyph-width').value = font.metadata.glyphWidth;
+        document.getElementById('setting-glyph-height').value = font.metadata.glyphHeight;
+        document.getElementById('setting-baseline').value = font.metadata.baseline;
+        document.getElementById('setting-ascent').value = font.metadata.ascent;
+        document.getElementById('setting-descent').value = font.metadata.descent;
+        document.getElementById('setting-default-spacing').value = font.metadata.defaultSpacing;
+        document.getElementById('setting-font-name').value = font.metadata.name || '';
+        document.getElementById('setting-author').value = font.metadata.author || '';
+        document.getElementById('setting-version').value = font.metadata.version || '';
+        
+        const tabs = document.querySelectorAll('.settings-tab');
+        tabs.forEach(t => t.classList.remove('active'));
+        const panes = document.querySelectorAll('.settings-pane');
+        panes.forEach(p => p.classList.remove('active'));
+        
+        const tabEl = document.querySelector(`.settings-tab[data-tab="${tab}"]`);
+        const paneEl = document.getElementById(`settings-${tab}`);
+        if (tabEl) tabEl.classList.add('active');
+        if (paneEl) paneEl.classList.add('active');
+        
+        renderKerningList();
+        renderLigatureList();
+        loadBatchPreview();
+        
+        showModal('settings-modal');
     }
 
     function updateSettingsForm() {
-        document.getElementById('setting-name').value = fontData.metadata.name;
-        document.getElementById('setting-author').value = fontData.metadata.author;
-        document.getElementById('setting-version').value = fontData.metadata.version;
-        document.getElementById('setting-glyph-width').value = fontData.metadata.glyphWidth;
-        document.getElementById('setting-glyph-height').value = fontData.metadata.glyphHeight;
-        document.getElementById('setting-ascent').value = fontData.metadata.ascent;
-        document.getElementById('setting-baseline').value = fontData.metadata.baseline;
-        document.getElementById('setting-descent').value = fontData.metadata.descent;
-        document.getElementById('setting-default-spacing').value = fontData.metadata.defaultSpacing;
+        // This can be used to update settings form if it's visible
     }
 
-    function saveSettings() {
-        const newWidth = parseInt(document.getElementById('setting-glyph-width').value);
-        const newHeight = parseInt(document.getElementById('setting-glyph-height').value);
-        const newAscent = parseInt(document.getElementById('setting-ascent').value);
-        const newBaseline = parseInt(document.getElementById('setting-baseline').value);
-        const newDescent = parseInt(document.getElementById('setting-descent').value);
+    function applySettings() {
+        const font = getCurrentFont();
+        saveHistory();
         
-        if (newAscent > newHeight) {
-            alert('上升线位置不能超过字形高度！');
-            return;
-        }
-        if (newBaseline > newAscent) {
-            alert('基线位置不能大于上升线位置！');
-            return;
-        }
-        if (newDescent > newBaseline) {
-            alert('下降线位置不能大于基线位置！');
-            return;
-        }
+        font.metadata.glyphWidth = parseInt(document.getElementById('setting-glyph-width').value);
+        font.metadata.glyphHeight = parseInt(document.getElementById('setting-glyph-height').value);
+        font.metadata.baseline = parseInt(document.getElementById('setting-baseline').value);
+        font.metadata.ascent = parseInt(document.getElementById('setting-ascent').value);
+        font.metadata.descent = parseInt(document.getElementById('setting-descent').value);
+        font.metadata.defaultSpacing = parseInt(document.getElementById('setting-default-spacing').value);
+        font.metadata.name = document.getElementById('setting-font-name').value;
+        font.metadata.author = document.getElementById('setting-author').value;
+        font.metadata.version = document.getElementById('setting-version').value;
         
-        fontData.metadata.name = document.getElementById('setting-name').value;
-        fontData.metadata.author = document.getElementById('setting-author').value;
-        fontData.metadata.version = document.getElementById('setting-version').value;
-        fontData.metadata.glyphWidth = newWidth;
-        fontData.metadata.glyphHeight = newHeight;
-        fontData.metadata.ascent = newAscent;
-        fontData.metadata.baseline = newBaseline;
-        fontData.metadata.descent = newDescent;
-        fontData.metadata.defaultSpacing = parseInt(document.getElementById('setting-default-spacing').value);
+        document.title = `${font.metadata.name || 'Pixel Font Designer'} - 像素字体设计器`;
         
-        Object.keys(fontData.glyphs).forEach(cp => {
-            const glyph = fontData.glyphs[cp];
-            const oldPixels = glyph.pixels;
-            const newPixels = [];
-            
-            for (let y = 0; y < newHeight; y++) {
-                let newRow = '';
-                for (let x = 0; x < newWidth; x++) {
-                    const oldY = y < oldPixels.length ? y : oldPixels.length - 1;
-                    const oldRow = oldPixels[oldY] || '';
-                    newRow += x < oldRow.length ? oldRow[x] : '0';
+        Object.keys(font.glyphs).forEach(cp => {
+            const glyph = font.glyphs[cp];
+            if (glyph.width !== font.metadata.glyphWidth || glyph.height !== font.metadata.glyphHeight) {
+                const oldPixels = glyph.pixels;
+                const newPixels = [];
+                for (let y = 0; y < font.metadata.glyphHeight; y++) {
+                    let row = '';
+                    for (let x = 0; x < font.metadata.glyphWidth; x++) {
+                        if (y < oldPixels.length && x < oldPixels[y].length) {
+                            row += oldPixels[y][x];
+                        } else {
+                            row += '0';
+                        }
+                    }
+                    newPixels.push(row);
                 }
-                newPixels.push(newRow);
+                glyph.width = font.metadata.glyphWidth;
+                glyph.height = font.metadata.glyphHeight;
+                glyph.pixels = newPixels;
             }
-            
-            glyph.width = newWidth;
-            glyph.height = newHeight;
-            glyph.pixels = newPixels;
         });
         
-        renderGlyphCanvas();
-        renderCharsetGrid();
-        renderPreview();
         hideModal('settings-modal');
+        renderAll();
+        renderFontSelector();
+    }
+
+    function addKerningPair() {
+        const left = document.getElementById('kerning-left').value;
+        const right = document.getElementById('kerning-right').value;
+        const value = parseInt(document.getElementById('kerning-value').value) || 0;
+        
+        if (!left || !right) {
+            alert('请输入左右字符');
+            return;
+        }
+        
+        const font = getCurrentFont();
+        const key = left[0] + right[0];
+        font.kerning[key] = value;
+        
+        saveHistory();
+        renderKerningList();
+        renderPreview();
+    }
+
+    function removeKerningPair(key) {
+        const font = getCurrentFont();
+        delete font.kerning[key];
+        saveHistory();
+        renderKerningList();
+        renderPreview();
     }
 
     function renderKerningList() {
+        const font = getCurrentFont();
         const list = document.getElementById('kerning-list');
-        list.innerHTML = '';
+        if (!list) return;
+        const kerningKeys = Object.keys(font.kerning).sort();
         
-        Object.keys(fontData.kerning).sort().forEach(key => {
-            const item = document.createElement('div');
-            item.className = 'kerning-item';
-            item.innerHTML = `
-                <span class="kerning-pair">${key}</span>
-                <span class="kerning-value">${fontData.kerning[key] > 0 ? '+' : ''}${fontData.kerning[key]}</span>
-            `;
-            item.addEventListener('click', () => {
-                document.getElementById('kerning-left').value = key[0];
-                document.getElementById('kerning-right').value = key[1];
-                document.getElementById('kerning-slider').value = fontData.kerning[key];
-                document.getElementById('kerning-value').textContent = fontData.kerning[key];
-                updateKerningPreview();
-            });
-            list.appendChild(item);
-        });
-    }
-
-    function renderSuggestionList() {
-        const list = document.getElementById('suggestion-list');
-        list.innerHTML = '';
-        
-        DEFAULT_KERNING_SUGGESTIONS.forEach(([left, right, value]) => {
-            const key = left + right;
-            if (fontData.kerning[key]) return;
-            
-            const item = document.createElement('div');
-            item.className = 'suggestion-item';
-            item.innerHTML = `
-                <span class="kerning-pair">${key}</span>
-                <span class="kerning-value">${value > 0 ? '+' : ''}${value}</span>
-                <span class="accept-btn">[接受]</span>
-            `;
-            item.addEventListener('click', () => {
-                fontData.kerning[key] = value;
-                renderKerningList();
-                renderSuggestionList();
-                renderPreview();
-            });
-            list.appendChild(item);
-        });
-    }
-
-    function updateKerningPreview() {
-        const left = document.getElementById('kerning-left').value;
-        const right = document.getElementById('kerning-right').value;
-        const value = parseInt(document.getElementById('kerning-slider').value);
-        document.getElementById('kerning-value').textContent = value;
-        document.getElementById('kerning-preview-text').textContent = left + right;
-        document.getElementById('kerning-preview-text').style.letterSpacing = value + 'px';
-    }
-
-    function addKerning() {
-        const left = document.getElementById('kerning-left').value;
-        const right = document.getElementById('kerning-right').value;
-        const value = parseInt(document.getElementById('kerning-slider').value);
-        
-        if (!left || !right) {
-            alert('请输入左右字符！');
+        if (kerningKeys.length === 0) {
+            list.innerHTML = '<div class="kerning-empty">暂无字距对</div>';
             return;
         }
         
-        const key = left + right;
-        if (value === 0) {
-            delete fontData.kerning[key];
-        } else {
-            fontData.kerning[key] = value;
-        }
-        
-        renderKerningList();
-        renderSuggestionList();
-        renderPreview();
-    }
-
-    function deleteKerning() {
-        const left = document.getElementById('kerning-left').value;
-        const right = document.getElementById('kerning-right').value;
-        const key = left + right;
-        delete fontData.kerning[key];
-        renderKerningList();
-        renderSuggestionList();
-        renderPreview();
-    }
-
-    function renderLigatureList() {
-        const list = document.getElementById('ligature-list');
         list.innerHTML = '';
-        
-        Object.keys(fontData.ligatures).sort((a, b) => b.length - a.length).forEach(key => {
+        kerningKeys.forEach(key => {
             const item = document.createElement('div');
-            item.className = 'ligature-item';
-            if (state.currentLigature === key) item.classList.add('active');
-            item.innerHTML = `<span class="kerning-pair">${key}</span>`;
-            item.addEventListener('click', () => {
-                state.currentLigature = key;
-                document.getElementById('ligature-chars').value = key;
-                document.getElementById('ligature-width').value = fontData.ligatures[key].width;
-                renderLigatureList();
-                renderLigatureCanvas();
-            });
+            item.className = 'kerning-item';
+            
+            const chars = document.createElement('span');
+            chars.className = 'kerning-chars';
+            chars.textContent = `"${key[0]}" + "${key[1]}"`;
+            
+            const value = document.createElement('span');
+            value.className = 'kerning-value';
+            value.textContent = font.kerning[key] + 'px';
+            
+            const removeBtn = document.createElement('button');
+            removeBtn.className = 'kerning-remove';
+            removeBtn.textContent = '删除';
+            removeBtn.onclick = () => removeKerningPair(key);
+            
+            item.appendChild(chars);
+            item.appendChild(value);
+            item.appendChild(removeBtn);
             list.appendChild(item);
         });
     }
 
     function addLigature() {
-        const chars = document.getElementById('ligature-chars').value.trim();
-        if (!chars || chars.length < 2) {
-            alert('请输入至少2个字符的连字序列！');
+        const input = document.getElementById('ligature-input').value;
+        
+        if (!input || input.length < 2) {
+            alert('请输入至少2个字符的连字序列');
             return;
         }
         
-        if (!fontData.ligatures[chars]) {
-            const width = parseInt(document.getElementById('ligature-width').value) || chars.length * fontData.metadata.glyphWidth;
-            fontData.ligatures[chars] = createEmptyGlyph(width, fontData.metadata.glyphHeight);
+        const font = getCurrentFont();
+        
+        if (font.ligatures[input]) {
+            alert('该连字已存在');
+            return;
         }
         
-        state.currentLigature = chars;
+        const width = font.metadata.glyphWidth * input.length;
+        const height = font.metadata.glyphHeight;
+        const pixels = [];
+        for (let y = 0; y < height; y++) {
+            pixels.push('0'.repeat(width));
+        }
+        
+        font.ligatures[input] = {
+            width: width,
+            height: height,
+            pixels: pixels,
+            modified: false
+        };
+        
+        saveHistory();
         renderLigatureList();
-        renderLigatureCanvas();
         renderPreview();
     }
 
-    function deleteLigature() {
-        const chars = document.getElementById('ligature-chars').value.trim();
-        if (!chars) return;
-        
-        if (confirm(`确定要删除连字 "${chars}" 吗？`)) {
-            delete fontData.ligatures[chars];
-            if (state.currentLigature === chars) {
-                state.currentLigature = null;
-            }
+    function removeLigature(key) {
+        const font = getCurrentFont();
+        if (confirm(`确定删除连字 "${key}" 吗？`)) {
+            delete font.ligatures[key];
+            saveHistory();
             renderLigatureList();
-            renderLigatureCanvas();
+            renderGlyphSet();
             renderPreview();
         }
     }
 
-    function setLigatureWidth() {
-        if (!state.currentLigature || !fontData.ligatures[state.currentLigature]) return;
+    function editLigature(key) {
+        state.currentLigature = key;
+        state.currentTab = 'ligatures';
+        hideModal('settings-modal');
+        updateTabs();
+        renderEditor();
+        renderGlyphSet();
+    }
+
+    function renderLigatureList() {
+        const font = getCurrentFont();
+        const list = document.getElementById('ligature-list');
+        if (!list) return;
+        const ligatureKeys = Object.keys(font.ligatures).sort();
         
-        const newWidth = parseInt(document.getElementById('ligature-width').value);
-        const ligature = fontData.ligatures[state.currentLigature];
-        
-        if (newWidth < 6 || newWidth > 32) {
-            alert('连字宽度必须在6到32之间！');
+        if (ligatureKeys.length === 0) {
+            list.innerHTML = '<div class="ligature-empty">暂无连字</div>';
             return;
         }
         
-        const oldWidth = ligature.width;
-        ligature.width = newWidth;
-        
-        ligature.pixels = ligature.pixels.map(row => {
-            if (newWidth > oldWidth) {
-                return row + '0'.repeat(newWidth - oldWidth);
-            } else {
-                return row.substring(0, newWidth);
+        list.innerHTML = '';
+        ligatureKeys.forEach(key => {
+            const item = document.createElement('div');
+            item.className = 'ligature-item';
+            if (state.currentLigature === key && state.currentTab === 'ligatures') {
+                item.classList.add('active');
             }
+            
+            const name = document.createElement('span');
+            name.className = 'ligature-name';
+            name.textContent = key;
+            
+            const actions = document.createElement('div');
+            actions.className = 'ligature-actions';
+            
+            const editBtn = document.createElement('button');
+            editBtn.className = 'ligature-edit';
+            editBtn.textContent = '编辑';
+            editBtn.onclick = (e) => {
+                e.stopPropagation();
+                editLigature(key);
+            };
+            
+            const removeBtn = document.createElement('button');
+            removeBtn.className = 'ligature-remove';
+            removeBtn.textContent = '删除';
+            removeBtn.onclick = (e) => {
+                e.stopPropagation();
+                removeLigature(key);
+            };
+            
+            actions.appendChild(editBtn);
+            actions.appendChild(removeBtn);
+            item.appendChild(name);
+            item.appendChild(actions);
+            
+            item.onclick = () => editLigature(key);
+            
+            list.appendChild(item);
         });
-        
-        renderLigatureCanvas();
-        renderPreview();
     }
 
-    function batchImport(text) {
+    function importBatchImages(files) {
+        const font = getCurrentFont();
         let count = 0;
-        for (let i = 0; i < text.length; i++) {
-            const cp = text.codePointAt(i);
-            if (cp >= 0x20 && !fontData.glyphs[cp]) {
-                fontData.glyphs[cp] = createEmptyGlyph(
-                    fontData.metadata.glyphWidth,
-                    fontData.metadata.glyphHeight
-                );
-                count++;
+        
+        const processFile = (file, index) => {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvasEl = document.createElement('canvas');
+                        canvasEl.width = font.metadata.glyphWidth;
+                        canvasEl.height = font.metadata.glyphHeight;
+                        const ctx2d = canvasEl.getContext('2d');
+                        
+                        ctx2d.imageSmoothingEnabled = false;
+                        ctx2d.drawImage(img, 0, 0, font.metadata.glyphWidth, font.metadata.glyphHeight);
+                        
+                        const imageData = ctx2d.getImageData(0, 0, font.metadata.glyphWidth, font.metadata.glyphHeight);
+                        const pixels = [];
+                        
+                        for (let y = 0; y < font.metadata.glyphHeight; y++) {
+                            let row = '';
+                            for (let x = 0; x < font.metadata.glyphWidth; x++) {
+                                const idx = (y * font.metadata.glyphWidth + x) * 4;
+                                const r = imageData.data[idx];
+                                const g = imageData.data[idx + 1];
+                                const b = imageData.data[idx + 2];
+                                const a = imageData.data[idx + 3];
+                                
+                                if (a > 128 && (r + g + b) / 3 > 128) {
+                                    row += '1';
+                                } else {
+                                    row += '0';
+                                }
+                            }
+                            pixels.push(row);
+                        }
+                        
+                        const fileName = file.name.replace(/\.[^/.]+$/, '');
+                        const char = fileName.length === 1 ? fileName : fileName[0];
+                        const cp = char.codePointAt(0);
+                        
+                        font.glyphs[cp] = {
+                            width: font.metadata.glyphWidth,
+                            height: font.metadata.glyphHeight,
+                            pixels: pixels,
+                            modified: true
+                        };
+                        
+                        count++;
+                        resolve();
+                    };
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        };
+        
+        Promise.all(Array.from(files).map((f, i) => processFile(f, i))).then(() => {
+            saveHistory();
+            renderGlyphSet();
+            renderEditor();
+            renderPreview();
+            loadBatchPreview();
+            alert(`成功导入 ${count} 个字形`);
+        });
+    }
+
+    function loadBatchPreview() {
+        const font = getCurrentFont();
+        const container = document.getElementById('batch-preview');
+        if (!container) return;
+        container.innerHTML = '';
+        
+        Object.keys(font.glyphs).sort((a, b) => a - b).forEach(cp => {
+            const glyph = font.glyphs[cp];
+            const canvasEl = document.createElement('canvas');
+            canvasEl.width = glyph.width * 2;
+            canvasEl.height = glyph.height * 2;
+            const ctx2d = canvasEl.getContext('2d');
+            ctx2d.imageSmoothingEnabled = false;
+            
+            ctx2d.fillStyle = '#1a1a2e';
+            ctx2d.fillRect(0, 0, canvasEl.width, canvasEl.height);
+            
+            ctx2d.fillStyle = '#fff';
+            for (let y = 0; y < glyph.height; y++) {
+                for (let x = 0; x < glyph.width; x++) {
+                    if (glyph.pixels[y][x] === '1') {
+                        ctx2d.fillRect(x * 2, y * 2, 2, 2);
+                    }
+                }
             }
-        }
-        renderCharsetGrid();
-        return count;
+            
+            const wrap = document.createElement('div');
+            wrap.className = 'batch-preview-item';
+            wrap.appendChild(canvasEl);
+            
+            const label = document.createElement('div');
+            label.className = 'batch-preview-label';
+            label.textContent = String.fromCodePoint(Number(cp));
+            wrap.appendChild(label);
+            
+            container.appendChild(wrap);
+        });
     }
 
-    function copyGlyph(fromCodePoint, toCodePoint) {
-        const fromGlyph = getGlyph(fromCodePoint);
-        fontData.glyphs[toCodePoint] = cloneGlyph(fromGlyph);
-        fontData.glyphs[toCodePoint].modified = true;
+    function copyGlyph(codePoint) {
+        const cp = codePoint !== undefined ? codePoint : state.currentCodePoint;
+        const font = getCurrentFont();
+        const glyph = font.glyphs[cp];
+        if (!glyph) return;
+        
+        state.clipboardGlyph = {
+            width: glyph.width,
+            height: glyph.height,
+            pixels: [...glyph.pixels]
+        };
+        
+        alert('字形已复制到剪贴板');
     }
 
-    function createVariant(codePoint) {
-        const newCodePoint = prompt('请输入新字形的Unicode码点（十进制或十六进制，如65或0x41）：');
-        if (!newCodePoint) return;
-        
-        let cp;
-        if (newCodePoint.startsWith('0x') || newCodePoint.startsWith('0X')) {
-            cp = parseInt(newCodePoint, 16);
-        } else {
-            cp = parseInt(newCodePoint, 10);
-        }
-        
-        if (isNaN(cp) || cp < 0) {
-            alert('无效的码点！');
+    function pasteGlyph(codePoint) {
+        if (!state.clipboardGlyph) {
+            alert('剪贴板为空');
             return;
         }
         
-        copyGlyph(codePoint, cp);
-        renderCharsetGrid();
-        alert(`已创建变体到 ${String.fromCodePoint(cp)} (U+${cp.toString(16).toUpperCase().padStart(4, '0')})`);
+        const cp = codePoint !== undefined ? codePoint : state.currentCodePoint;
+        saveHistory();
+        const font = getCurrentFont();
+        
+        font.glyphs[cp] = {
+            width: state.clipboardGlyph.width,
+            height: state.clipboardGlyph.height,
+            pixels: [...state.clipboardGlyph.pixels],
+            modified: true
+        };
+        
+        renderEditor();
+        renderGlyphSet();
+        renderPreview();
     }
 
     function deleteGlyph(codePoint) {
-        if (codePoint === 0x20) {
-            alert('不能删除空格字符！');
-            return;
-        }
-        if (confirm(`确定要删除字符 ${String.fromCodePoint(codePoint)} (U+${codePoint.toString(16).toUpperCase().padStart(4, '0')}) 吗？`)) {
-            delete fontData.glyphs[codePoint];
-            if (state.currentCodePoint === codePoint) {
-                state.currentCodePoint = 0x41;
-                clearHistory();
-                updateCurrentCharInfo();
+        const cp = codePoint !== undefined ? codePoint : state.currentCodePoint;
+        const font = getCurrentFont();
+        const char = String.fromCodePoint(cp);
+        
+        if (confirm(`确定删除字符 "${char}" (U+${cp.toString(16).toUpperCase()}) 的字形吗？`)) {
+            saveHistory();
+            delete font.glyphs[cp];
+            
+            const cps = getAvailableCodePoints();
+            if (cps.length > 0 && cp === state.currentCodePoint) {
+                state.currentCodePoint = cps[0];
             }
-            renderGlyphCanvas();
-            renderCharsetGrid();
+            
+            renderEditor();
+            renderGlyphSet();
             renderPreview();
+            updateCurrentCharInfo();
         }
     }
 
-    function copyGlyphTo(codePoint) {
-        const targetCodePoint = prompt('请输入目标码点（十进制或十六进制，如65或0x41）：');
-        if (!targetCodePoint) return;
+    function createVariant(type) {
+        saveHistory();
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
         
-        let cp;
-        if (targetCodePoint.startsWith('0x') || targetCodePoint.startsWith('0X')) {
-            cp = parseInt(targetCodePoint, 16);
+        const newPixels = [];
+        
+        switch (type) {
+            case 'flip-h':
+                for (let y = 0; y < glyph.height; y++) {
+                    newPixels.push(glyph.pixels[y].split('').reverse().join(''));
+                }
+                break;
+            case 'flip-v':
+                for (let y = glyph.height - 1; y >= 0; y--) {
+                    newPixels.push(glyph.pixels[y]);
+                }
+                break;
+            case 'rotate-cw':
+                for (let x = 0; x < glyph.width; x++) {
+                    let row = '';
+                    for (let y = glyph.height - 1; y >= 0; y--) {
+                        row += glyph.pixels[y][x];
+                    }
+                    newPixels.push(row);
+                }
+                const tempW = glyph.width;
+                glyph.width = glyph.height;
+                glyph.height = tempW;
+                break;
+            case 'rotate-ccw':
+                for (let x = glyph.width - 1; x >= 0; x--) {
+                    let row = '';
+                    for (let y = 0; y < glyph.height; y++) {
+                        row += glyph.pixels[y][x];
+                    }
+                    newPixels.push(row);
+                }
+                const tempW2 = glyph.width;
+                glyph.width = glyph.height;
+                glyph.height = tempW2;
+                break;
+            case 'bold':
+                for (let y = 0; y < glyph.height; y++) {
+                    let row = '';
+                    for (let x = 0; x < glyph.width; x++) {
+                        if (glyph.pixels[y][x] === '1' || (x > 0 && glyph.pixels[y][x - 1] === '1')) {
+                            row += '1';
+                        } else {
+                            row += '0';
+                        }
+                    }
+                    newPixels.push(row);
+                }
+                break;
+            case 'shift-left':
+                for (let y = 0; y < glyph.height; y++) {
+                    newPixels.push(glyph.pixels[y].substring(1) + '0');
+                }
+                break;
+            case 'shift-right':
+                for (let y = 0; y < glyph.height; y++) {
+                    newPixels.push('0' + glyph.pixels[y].substring(0, glyph.width - 1));
+                }
+                break;
+            case 'shift-up':
+                for (let y = 1; y < glyph.height; y++) {
+                    newPixels.push(glyph.pixels[y]);
+                }
+                newPixels.push('0'.repeat(glyph.width));
+                break;
+            case 'shift-down':
+                newPixels.push('0'.repeat(glyph.width));
+                for (let y = 0; y < glyph.height - 1; y++) {
+                    newPixels.push(glyph.pixels[y]);
+                }
+                break;
+        }
+        
+        glyph.pixels = newPixels;
+        glyph.modified = true;
+        
+        renderEditor();
+        renderGlyphSet();
+        renderPreview();
+    }
+
+    function deleteCurrentGlyph() {
+        if (state.currentTab === 'ligatures' && state.currentLigature) {
+            removeLigature(state.currentLigature);
         } else {
-            cp = parseInt(targetCodePoint, 10);
+            deleteGlyph(state.currentCodePoint);
         }
-        
-        if (isNaN(cp) || cp < 0) {
-            alert('无效的码点！');
-            return;
-        }
-        
-        copyGlyph(codePoint, cp);
-        renderCharsetGrid();
-        alert(`已复制到 ${String.fromCodePoint(cp)} (U+${cp.toString(16).toUpperCase().padStart(4, '0')})`);
     }
 
-    function handleContextMenuAction(action) {
-        if (!state.contextMenuCodePoint) return;
-        
-        switch (action) {
-            case 'copy':
-                copyGlyphTo(state.contextMenuCodePoint);
-                break;
-            case 'variant':
-                createVariant(state.contextMenuCodePoint);
-                break;
-            case 'delete':
-                deleteGlyph(state.contextMenuCodePoint);
-                break;
-        }
-        
-        hideContextMenu();
-    }
-
-    function createDemoFont() {
-        const demoGlyphs = {
-            'A': [
-                '00111000',
-                '01111100',
-                '11000110',
-                '11000110',
-                '11111110',
-                '11111110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '00000000',
-                '00000000'
-            ],
-            'B': [
-                '11111000',
-                '11001100',
-                '11000110',
-                '11000110',
-                '11111100',
-                '11111100',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11111100',
-                '00000000',
-                '00000000'
-            ],
-            'C': [
-                '00111100',
-                '01111110',
-                '11000110',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11000110',
-                '01111110',
-                '00000000',
-                '00000000'
-            ],
-            'D': [
-                '11111000',
-                '11001100',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11111100',
-                '00000000',
-                '00000000'
-            ],
-            'E': [
-                '11111110',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11111000',
-                '11111000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11111110',
-                '00000000',
-                '00000000'
-            ],
-            'F': [
-                '11111110',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11111000',
-                '11111000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '00000000',
-                '00000000'
-            ],
-            'G': [
-                '00111100',
-                '01111110',
-                '11000110',
-                '11000000',
-                '11000000',
-                '11011110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '01111110',
-                '00000000',
-                '00000000'
-            ],
-            'H': [
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11111110',
-                '11111110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '00000000',
-                '00000000'
-            ],
-            'I': [
-                '01111110',
-                '00111100',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '01111110',
-                '00000000',
-                '00000000'
-            ],
-            'J': [
-                '00111110',
-                '00011110',
-                '00001100',
-                '00001100',
-                '00001100',
-                '00001100',
-                '00001100',
-                '00001100',
-                '11001100',
-                '01111000',
-                '00000000',
-                '00000000'
-            ],
-            'K': [
-                '11000110',
-                '11001100',
-                '11011000',
-                '11110000',
-                '11110000',
-                '11111000',
-                '11011100',
-                '11001110',
-                '11000110',
-                '11000110',
-                '00000000',
-                '00000000'
-            ],
-            'L': [
-                '11000000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11111110',
-                '00000000',
-                '00000000'
-            ],
-            'M': [
-                '11000110',
-                '11101110',
-                '11111110',
-                '11111110',
-                '11010110',
-                '11010110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '00000000',
-                '00000000'
-            ],
-            'N': [
-                '11000110',
-                '11100110',
-                '11110110',
-                '11011110',
-                '11001110',
-                '11001110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '00000000',
-                '00000000'
-            ],
-            'O': [
-                '00111100',
-                '01111110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '01111110',
-                '00111100',
-                '00000000'
-            ],
-            'P': [
-                '11111100',
-                '11001110',
-                '11000110',
-                '11000110',
-                '11001110',
-                '11111100',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '00000000',
-                '00000000'
-            ],
-            'Q': [
-                '00111100',
-                '01111110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11001110',
-                '11011110',
-                '01110110',
-                '00111110',
-                '00000110',
-                '00000000'
-            ],
-            'R': [
-                '11111100',
-                '11001110',
-                '11000110',
-                '11000110',
-                '11001110',
-                '11111100',
-                '11011100',
-                '11001110',
-                '11000110',
-                '11000110',
-                '00000000',
-                '00000000'
-            ],
-            'S': [
-                '00111100',
-                '01111110',
-                '11000110',
-                '11000000',
-                '01111000',
-                '00111100',
-                '00001110',
-                '00000110',
-                '11000110',
-                '01111110',
-                '00111100',
-                '00000000'
-            ],
-            'T': [
-                '11111110',
-                '11111110',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00000000',
-                '00000000'
-            ],
-            'U': [
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '01111110',
-                '00111100',
-                '00000000'
-            ],
-            'V': [
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '01000100',
-                '01101100',
-                '00111000',
-                '00111000',
-                '00010000',
-                '00000000',
-                '00000000'
-            ],
-            'W': [
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11010110',
-                '11010110',
-                '11010110',
-                '11111110',
-                '01111110',
-                '01000100',
-                '00000000',
-                '00000000'
-            ],
-            'X': [
-                '11000110',
-                '11000110',
-                '01101100',
-                '00111000',
-                '00111000',
-                '00010000',
-                '00111000',
-                '00111000',
-                '01101100',
-                '11000110',
-                '00000000',
-                '00000000'
-            ],
-            'Y': [
-                '11000110',
-                '11000110',
-                '11000110',
-                '01101100',
-                '00111000',
-                '00010000',
-                '00010000',
-                '00010000',
-                '00010000',
-                '00010000',
-                '00000000',
-                '00000000'
-            ],
-            'Z': [
-                '11111110',
-                '00000110',
-                '00001100',
-                '00011000',
-                '00110000',
-                '01100000',
-                '11000000',
-                '11000000',
-                '11000000',
-                '11111110',
-                '00000000',
-                '00000000'
-            ],
-            '0': [
-                '00111100',
-                '01111110',
-                '11000110',
-                '11001110',
-                '11011110',
-                '11110110',
-                '11100110',
-                '11000110',
-                '11000110',
-                '01111110',
-                '00111100',
-                '00000000'
-            ],
-            '1': [
-                '00011000',
-                '00111000',
-                '01111000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '01111110',
-                '00000000',
-                '00000000'
-            ],
-            '2': [
-                '00111100',
-                '01111110',
-                '11000110',
-                '00000110',
-                '00001100',
-                '00011000',
-                '00110000',
-                '01100000',
-                '11000000',
-                '11111110',
-                '00000000',
-                '00000000'
-            ],
-            '3': [
-                '00111100',
-                '01111110',
-                '11000110',
-                '00000110',
-                '00011100',
-                '00001100',
-                '00000110',
-                '00000110',
-                '11000110',
-                '01111110',
-                '00111100',
-                '00000000'
-            ],
-            '4': [
-                '00001100',
-                '00011100',
-                '00111100',
-                '01101100',
-                '11001100',
-                '11001100',
-                '11111110',
-                '00001100',
-                '00001100',
-                '00001100',
-                '00000000',
-                '00000000'
-            ],
-            '5': [
-                '11111110',
-                '11000000',
-                '11000000',
-                '11111100',
-                '11111110',
-                '00000110',
-                '00000110',
-                '00000110',
-                '11000110',
-                '01111110',
-                '00111100',
-                '00000000'
-            ],
-            '6': [
-                '00111100',
-                '01111110',
-                '11000110',
-                '11000000',
-                '11000000',
-                '11111100',
-                '11111110',
-                '11000110',
-                '11000110',
-                '01111110',
-                '00111100',
-                '00000000'
-            ],
-            '7': [
-                '11111110',
-                '11111110',
-                '00000110',
-                '00001100',
-                '00011000',
-                '00110000',
-                '00110000',
-                '00110000',
-                '00110000',
-                '00110000',
-                '00000000',
-                '00000000'
-            ],
-            '8': [
-                '00111100',
-                '01111110',
-                '11000110',
-                '11000110',
-                '01111110',
-                '00111100',
-                '01111110',
-                '11000110',
-                '11000110',
-                '01111110',
-                '00111100',
-                '00000000'
-            ],
-            '9': [
-                '00111100',
-                '01111110',
-                '11000110',
-                '11000110',
-                '01111110',
-                '00111110',
-                '00000110',
-                '00000110',
-                '11000110',
-                '01111110',
-                '00111100',
-                '00000000'
-            ],
-            ' ': [
-                '00000000',
-                '00000000',
-                '00000000',
-                '00000000',
-                '00000000',
-                '00000000',
-                '00000000',
-                '00000000',
-                '00000000',
-                '00000000',
-                '00000000',
-                '00000000'
-            ],
-            'e': [
-                '00000000',
-                '00000000',
-                '00111100',
-                '01111110',
-                '11000110',
-                '11111110',
-                '11000000',
-                '11000110',
-                '01111110',
-                '00111100',
-                '00000000',
-                '00000000'
-            ],
-            'h': [
-                '00000000',
-                '00000000',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11111110',
-                '11111110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '00000000',
-                '00000000'
-            ],
-            'l': [
-                '00000000',
-                '00000000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00000000',
-                '00000000'
-            ],
-            'i': [
-                '00000000',
-                '00000000',
-                '00011000',
-                '00000000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00011000',
-                '00000000',
-                '00000000'
-            ],
-            'o': [
-                '00000000',
-                '00000000',
-                '00111100',
-                '01111110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '01111110',
-                '00111100',
-                '00000000',
-                '00000000'
-            ],
-            'r': [
-                '00000000',
-                '00000000',
-                '00111100',
-                '01100110',
-                '01000000',
-                '01000000',
-                '01000000',
-                '01000000',
-                '01000000',
-                '01000000',
-                '00000000',
-                '00000000'
-            ],
-            'd': [
-                '00000000',
-                '00000000',
-                '00001100',
-                '00001100',
-                '00001100',
-                '00001100',
-                '00001100',
-                '00111110',
-                '01100110',
-                '11000110',
-                '01111110',
-                '00111100'
-            ],
-            'w': [
-                '00000000',
-                '00000000',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11000110',
-                '11010110',
-                '11010110',
-                '11010110',
-                '01101100',
-                '00000000',
-                '00000000'
-            ]
+    function createDemoFont(name, boldOffset) {
+        const font = {
+            metadata: {
+                name: name,
+                author: 'Demo',
+                version: '1.0',
+                glyphWidth: 8,
+                glyphHeight: 12,
+                baseline: 9,
+                ascent: 9,
+                descent: 3,
+                defaultSpacing: 1
+            },
+            glyphs: {},
+            kerning: {},
+            ligatures: {}
         };
         
-        Object.keys(demoGlyphs).forEach(char => {
-            const cp = char.charCodeAt(0);
-            fontData.glyphs[cp] = {
+        const demoGlyphs = {
+            65: ['00111000','01111100','11000110','11000110','11111110','11111110','11000110','11000110','11000110','11000110','00000000','00000000'],
+            66: ['11111000','11001100','11000110','11000110','11111100','11111100','11000110','11000110','11000110','11001100','11111000','00000000'],
+            67: ['00111100','01100110','11000000','11000000','11000000','11000000','11000000','11000000','11000000','01100110','00111100','00000000'],
+            68: ['11111000','11001100','11000110','11000110','11000110','11000110','11000110','11000110','11000110','11001100','11111000','00000000'],
+            69: ['11111110','11000000','11000000','11000000','11111000','11111000','11000000','11000000','11000000','11000000','11111110','00000000'],
+            70: ['11111110','11000000','11000000','11000000','11111000','11111000','11000000','11000000','11000000','11000000','11000000','00000000'],
+            71: ['00111100','01100110','11000000','11000000','11000000','11001110','11000110','11000110','11000110','01100110','00111100','00000000'],
+            72: ['11000110','11000110','11000110','11000110','11111110','11111110','11000110','11000110','11000110','11000110','11000110','00000000'],
+            73: ['01111100','00110000','00110000','00110000','00110000','00110000','00110000','00110000','00110000','00110000','01111100','00000000'],
+            74: ['00011100','00001100','00001100','00001100','00001100','00001100','00001100','00001100','11001100','11001100','01111000','00000000'],
+            75: ['11000110','11001100','11011000','11110000','11110000','11011000','11001100','11000110','11000110','11000110','11000110','00000000'],
+            76: ['11000000','11000000','11000000','11000000','11000000','11000000','11000000','11000000','11000000','11000000','11111110','00000000'],
+            77: ['11000011','11100111','11111111','11011011','11011011','11000011','11000011','11000011','11000011','11000011','11000011','00000000'],
+            78: ['11000110','11100110','11110110','11011110','11001110','11000110','11000110','11000110','11000110','11000110','11000110','00000000'],
+            79: ['00111000','01101100','11000110','11000110','11000110','11000110','11000110','11000110','11000110','01101100','00111000','00000000'],
+            80: ['11111000','11001100','11000110','11000110','11001100','11111000','11000000','11000000','11000000','11000000','11000000','00000000'],
+            81: ['00111000','01101100','11000110','11000110','11000110','11000110','11000110','11000110','11010110','01101100','00111010','00000000'],
+            82: ['11111000','11001100','11000110','11000110','11001100','11111000','11011000','11001100','11000110','11000110','11000110','00000000'],
+            83: ['01111100','11000110','11000000','11000000','01111000','00111100','00000110','00000010','11000010','11000110','01111100','00000000'],
+            84: ['11111110','00110000','00110000','00110000','00110000','00110000','00110000','00110000','00110000','00110000','00110000','00000000'],
+            85: ['11000110','11000110','11000110','11000110','11000110','11000110','11000110','11000110','11000110','11000110','01111100','00000000'],
+            86: ['11000110','11000110','11000110','11000110','11000110','11000110','11000110','01101100','01101100','00111000','00111000','00000000'],
+            87: ['11000011','11000011','11000011','11000011','11000011','11011011','11011011','11011011','11011011','11100111','11000011','00000000'],
+            88: ['11000110','11000110','01101100','01101100','00111000','00111000','00111000','01101100','01101100','11000110','11000110','00000000'],
+            89: ['11000110','11000110','01101100','01101100','00111000','00110000','00110000','00110000','00110000','00110000','00110000','00000000'],
+            90: ['11111110','00000110','00001100','00011000','00110000','01100000','11000000','11000000','11000000','11000000','11111110','00000000'],
+            32: ['00000000','00000000','00000000','00000000','00000000','00000000','00000000','00000000','00000000','00000000','00000000','00000000'],
+            46: ['00000000','00000000','00000000','00000000','00000000','00000000','00000000','00000000','00000000','00110000','00110000','00000000'],
+            44: ['00000000','00000000','00000000','00000000','00000000','00000000','00000000','00000000','00110000','00110000','01100000','00000000'],
+            33: ['00110000','00110000','00110000','00110000','00110000','00110000','00110000','00110000','00000000','00110000','00110000','00000000'],
+            63: ['01111000','11001100','00000110','00000110','00001100','00011000','00110000','00000000','00110000','00110000','00000000','00000000'],
+            45: ['00000000','00000000','00000000','00000000','00000000','11111100','00000000','00000000','00000000','00000000','00000000','00000000'],
+            43: ['00000000','00000000','00000000','00110000','00110000','11111100','00110000','00110000','00000000','00000000','00000000','00000000'],
+            61: ['00000000','00000000','00000000','11111100','00000000','00000000','11111100','00000000','00000000','00000000','00000000','00000000']
+        };
+        
+        Object.keys(demoGlyphs).forEach(cp => {
+            let pixels = demoGlyphs[cp];
+            
+            if (boldOffset > 0) {
+                const boldPixels = [];
+                for (let y = 0; y < pixels.length; y++) {
+                    let row = '';
+                    for (let x = 0; x < pixels[y].length; x++) {
+                        let hasPixel = false;
+                        for (let o = 0; o <= boldOffset && !hasPixel; o++) {
+                            if (x - o >= 0 && pixels[y][x - o] === '1') {
+                                hasPixel = true;
+                            }
+                        }
+                        row += hasPixel ? '1' : '0';
+                    }
+                    boldPixels.push(row);
+                }
+                pixels = boldPixels;
+            }
+            
+            font.glyphs[cp] = {
                 width: 8,
                 height: 12,
-                pixels: [...demoGlyphs[char]],
-                modified: true
+                pixels: pixels,
+                modified: false
             };
         });
         
-        for (let cp = 0x20; cp <= 0x7E; cp++) {
-            if (!fontData.glyphs[cp]) {
-                fontData.glyphs[cp] = createEmptyGlyph(8, 12);
+        return font;
+    }
+
+    function renderFontSelector() {
+        const selector = document.getElementById('font-selector');
+        const dropdown = document.getElementById('font-dropdown');
+        if (!selector || !dropdown) return;
+        
+        selector.innerHTML = '';
+        dropdown.innerHTML = '';
+        
+        const currentFont = getCurrentFont();
+        const currentColor = getFontColor(workspace.currentFontIndex);
+        
+        const selectorItem = document.createElement('div');
+        selectorItem.className = 'font-selector-current';
+        selectorItem.innerHTML = `
+            <span class="font-color-dot" style="background-color: ${currentColor}"></span>
+            <span class="font-name">${currentFont.metadata.name || '未命名'}</span>
+            <span class="font-dropdown-arrow">▼</span>
+        `;
+        selectorItem.onclick = (e) => {
+            e.stopPropagation();
+            toggleFontDropdown();
+        };
+        selector.appendChild(selectorItem);
+        
+        workspace.fonts.forEach((font, index) => {
+            const color = getFontColor(index);
+            
+            const dropdownItem = document.createElement('div');
+            dropdownItem.className = 'font-dropdown-item';
+            if (index === workspace.currentFontIndex) {
+                dropdownItem.classList.add('active');
+            }
+            dropdownItem.innerHTML = `
+                <span class="font-color-dot" style="background-color: ${color}"></span>
+                <span class="font-name">${font.metadata.name || '未命名'}</span>
+            `;
+            dropdownItem.onclick = () => {
+                switchFont(index);
+                toggleFontDropdown(false);
+            };
+            dropdownItem.oncontextmenu = (e) => {
+                e.preventDefault();
+                showFontContextMenu(e.clientX, e.clientY, index);
+            };
+            dropdown.appendChild(dropdownItem);
+        });
+        
+        const divider = document.createElement('div');
+        divider.className = 'font-dropdown-divider';
+        dropdown.appendChild(divider);
+        
+        const addItem = document.createElement('div');
+        addItem.className = 'font-dropdown-item';
+        addItem.innerHTML = '<span class="font-menu-icon">+</span><span class="font-name">新建空白字体</span>';
+        addItem.onclick = () => {
+            addBlankFont();
+            toggleFontDropdown(false);
+        };
+        dropdown.appendChild(addItem);
+        
+        const copyItem = document.createElement('div');
+        copyItem.className = 'font-dropdown-item';
+        copyItem.innerHTML = '<span class="font-menu-icon">⎘</span><span class="font-name">复制当前字体</span>';
+        copyItem.onclick = () => {
+            duplicateFont();
+            toggleFontDropdown(false);
+        };
+        dropdown.appendChild(copyItem);
+        
+        const renameItem = document.createElement('div');
+        renameItem.className = 'font-dropdown-item';
+        renameItem.innerHTML = '<span class="font-menu-icon">✎</span><span class="font-name">重命名</span>';
+        renameItem.onclick = () => {
+            renameFont();
+            toggleFontDropdown(false);
+        };
+        dropdown.appendChild(renameItem);
+        
+        const deleteItem = document.createElement('div');
+        deleteItem.className = 'font-dropdown-item danger';
+        deleteItem.innerHTML = '<span class="font-menu-icon">✕</span><span class="font-name">删除字体</span>';
+        deleteItem.onclick = () => {
+            deleteFont();
+            toggleFontDropdown(false);
+        };
+        if (workspace.fonts.length <= 1) {
+            deleteItem.classList.add('disabled');
+        }
+        dropdown.appendChild(deleteItem);
+    }
+
+    function toggleFontDropdown(show) {
+        const dropdown = document.getElementById('font-dropdown');
+        if (!dropdown) return;
+        if (show === undefined) {
+            dropdown.classList.toggle('active');
+        } else {
+            dropdown.classList.toggle('active', show);
+        }
+    }
+
+    function showFontContextMenu(x, y, fontIndex) {
+        const items = [
+            { icon: '✎', label: '重命名', action: () => { switchFont(fontIndex); renameFont(); } },
+            { icon: '⎘', label: '复制', action: () => { switchFont(fontIndex); duplicateFont(); } },
+            { divider: true },
+            { icon: '✕', label: '删除', danger: true, disabled: workspace.fonts.length <= 1, action: () => { switchFont(fontIndex); deleteFont(); } }
+        ];
+        showContextMenu(x, y, items);
+    }
+
+    function toggleCompareMode() {
+        state.compareMode = !state.compareMode;
+        const comparePanel = document.getElementById('compare-panel');
+        const compareBtn = document.getElementById('btn-compare');
+        
+        if (state.compareMode) {
+            if (workspace.fonts.length < 2) {
+                alert('需要至少两套字体才能对比');
+                state.compareMode = false;
+                return;
+            }
+            state.compareFontAIndex = 0;
+            state.compareFontBIndex = Math.min(1, workspace.fonts.length - 1);
+            state.compareCharIndex = 0;
+            renderCompareView();
+            comparePanel.classList.add('active');
+            compareBtn.classList.add('active');
+        } else {
+            comparePanel.classList.remove('active');
+            compareBtn.classList.remove('active');
+        }
+    }
+
+    function getCompareCharList() {
+        const fontA = workspace.fonts[state.compareFontAIndex];
+        const fontB = workspace.fonts[state.compareFontBIndex];
+        const allChars = new Set([
+            ...Object.keys(fontA.glyphs).map(Number),
+            ...Object.keys(fontB.glyphs).map(Number)
+        ]);
+        return Array.from(allChars).sort((a, b) => a - b);
+    }
+
+    function renderCompareView() {
+        const fontA = workspace.fonts[state.compareFontAIndex];
+        const fontB = workspace.fonts[state.compareFontBIndex];
+        const charList = getCompareCharList();
+        
+        if (state.compareCharIndex >= charList.length) {
+            state.compareCharIndex = 0;
+        }
+        
+        const cp = charList[state.compareCharIndex];
+        const char = String.fromCodePoint(cp);
+        
+        document.getElementById('compare-char-display').textContent = char;
+        document.getElementById('compare-char-code').textContent = `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+        
+        const glyphA = fontA.glyphs[cp];
+        const glyphB = fontB.glyphs[cp];
+        
+        const scale = 16;
+        
+        renderCompareGlyph('compare-glyph-a', glyphA, fontA, scale, cp, 'A');
+        renderCompareGlyph('compare-glyph-b', glyphB, fontB, scale, cp, 'B');
+        renderCompareDiff('compare-diff', glyphA, glyphB, scale);
+        
+        const stats = calculateDiffStats(glyphA, glyphB);
+        document.getElementById('diff-total').textContent = stats.total;
+        document.getElementById('diff-same').textContent = stats.same;
+        document.getElementById('diff-different').textContent = stats.different;
+        document.getElementById('diff-percent').textContent = stats.percent + '%';
+        
+        document.getElementById('compare-nav-info').textContent = `${state.compareCharIndex + 1} / ${charList.length}`;
+        
+        const selectA = document.getElementById('compare-font-a');
+        const selectB = document.getElementById('compare-font-b');
+        
+        selectA.innerHTML = '';
+        selectB.innerHTML = '';
+        workspace.fonts.forEach((font, idx) => {
+            const optA = document.createElement('option');
+            optA.value = idx;
+            optA.textContent = font.metadata.name || `字体${idx + 1}`;
+            if (idx === state.compareFontAIndex) optA.selected = true;
+            selectA.appendChild(optA);
+            
+            const optB = document.createElement('option');
+            optB.value = idx;
+            optB.textContent = font.metadata.name || `字体${idx + 1}`;
+            if (idx === state.compareFontBIndex) optB.selected = true;
+            selectB.appendChild(optB);
+        });
+    }
+
+    function renderCompareGlyph(canvasId, glyph, font, scale, cp, label) {
+        const canvasEl = document.getElementById(canvasId);
+        if (!canvasEl) return;
+        const ctx2d = canvasEl.getContext('2d');
+        
+        const width = font.metadata.glyphWidth * scale;
+        const height = font.metadata.glyphHeight * scale;
+        
+        canvasEl.width = width;
+        canvasEl.height = height;
+        
+        ctx2d.imageSmoothingEnabled = false;
+        ctx2d.fillStyle = '#0f0f23';
+        ctx2d.fillRect(0, 0, width, height);
+        
+        ctx2d.strokeStyle = 'rgba(255,255,255,0.05)';
+        ctx2d.lineWidth = 1;
+        for (let x = 0; x <= font.metadata.glyphWidth; x++) {
+            ctx2d.beginPath();
+            ctx2d.moveTo(x * scale + 0.5, 0);
+            ctx2d.lineTo(x * scale + 0.5, height);
+            ctx2d.stroke();
+        }
+        for (let y = 0; y <= font.metadata.glyphHeight; y++) {
+            ctx2d.beginPath();
+            ctx2d.moveTo(0, y * scale + 0.5);
+            ctx2d.lineTo(width, y * scale + 0.5);
+            ctx2d.stroke();
+        }
+        
+        if (glyph) {
+            ctx2d.fillStyle = '#ffffff';
+            for (let y = 0; y < glyph.height; y++) {
+                for (let x = 0; x < glyph.width; x++) {
+                    if (glyph.pixels[y] && glyph.pixels[y][x] === '1') {
+                        ctx2d.fillRect(x * scale, y * scale, scale, scale);
+                    }
+                }
+            }
+        } else {
+            ctx2d.fillStyle = 'rgba(255,255,255,0.3)';
+            ctx2d.font = `${scale * 2}px monospace`;
+            ctx2d.textAlign = 'center';
+            ctx2d.fillText('?', width / 2, height / 2 + scale);
+        }
+    }
+
+    function renderCompareDiff(canvasId, glyphA, glyphB, scale) {
+        const canvasEl = document.getElementById(canvasId);
+        if (!canvasEl) return;
+        const ctx2d = canvasEl.getContext('2d');
+        
+        const maxW = Math.max(glyphA ? glyphA.width : 8, glyphB ? glyphB.width : 8);
+        const maxH = Math.max(glyphA ? glyphA.height : 12, glyphB ? glyphB.height : 12);
+        
+        const width = maxW * scale;
+        const height = maxH * scale;
+        
+        canvasEl.width = width;
+        canvasEl.height = height;
+        
+        ctx2d.imageSmoothingEnabled = false;
+        ctx2d.fillStyle = '#0f0f23';
+        ctx2d.fillRect(0, 0, width, height);
+        
+        for (let y = 0; y < maxH; y++) {
+            for (let x = 0; x < maxW; x++) {
+                const hasA = glyphA && glyphA.pixels[y] && glyphA.pixels[y][x] === '1';
+                const hasB = glyphB && glyphB.pixels[y] && glyphB.pixels[y][x] === '1';
+                
+                if (hasA && hasB) {
+                    ctx2d.fillStyle = '#ffffff';
+                    ctx2d.fillRect(x * scale, y * scale, scale, scale);
+                } else if (hasA) {
+                    ctx2d.fillStyle = '#4ecdc4';
+                    ctx2d.fillRect(x * scale, y * scale, scale, scale);
+                } else if (hasB) {
+                    ctx2d.fillStyle = '#ff6b6b';
+                    ctx2d.fillRect(x * scale, y * scale, scale, scale);
+                }
+            }
+        }
+    }
+
+    function calculateDiffStats(glyphA, glyphB) {
+        const maxW = Math.max(glyphA ? glyphA.width : 0, glyphB ? glyphB.width : 0);
+        const maxH = Math.max(glyphA ? glyphA.height : 0, glyphB ? glyphB.height : 0);
+        
+        let total = 0, same = 0, different = 0;
+        
+        for (let y = 0; y < maxH; y++) {
+            for (let x = 0; x < maxW; x++) {
+                total++;
+                const hasA = glyphA && glyphA.pixels[y] && glyphA.pixels[y][x] === '1';
+                const hasB = glyphB && glyphB.pixels[y] && glyphB.pixels[y][x] === '1';
+                if (hasA === hasB) {
+                    same++;
+                } else {
+                    different++;
+                }
             }
         }
         
-        fontData.kerning['AV'] = -1;
-        fontData.kerning['VA'] = -1;
-        
-        fontData.ligatures['He'] = {
-            width: 16,
-            height: 12,
-            pixels: [
-                '0000000000000000',
-                '0000000000000000',
-                '1100011000000000',
-                '1100011000000000',
-                '1100011000111100',
-                '1100011001111110',
-                '1111111011000110',
-                '1111111011111110',
-                '1100011011000000',
-                '1100011011000110',
-                '0000000001111110',
-                '0000000000111100'
-            ],
-            modified: true
+        return {
+            total,
+            same,
+            different,
+            percent: total > 0 ? Math.round((same / total) * 100) : 0
         };
     }
 
-    function initEventListeners() {
-        document.querySelectorAll('.tool-btn[data-tool]').forEach(btn => {
-            btn.addEventListener('click', () => {
-                document.querySelectorAll('.tool-btn[data-tool]').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                state.currentTool = btn.dataset.tool;
-                state.lineStart = null;
-                renderGlyphCanvas();
-            });
+    function prevCompareChar() {
+        const charList = getCompareCharList();
+        if (state.compareCharIndex > 0) {
+            state.compareCharIndex--;
+            renderCompareView();
+        }
+    }
+
+    function nextCompareChar() {
+        const charList = getCompareCharList();
+        if (state.compareCharIndex < charList.length - 1) {
+            state.compareCharIndex++;
+            renderCompareView();
+        }
+    }
+
+    function setCompareFontA(idx) {
+        state.compareFontAIndex = parseInt(idx);
+        if (state.compareFontAIndex === state.compareFontBIndex) {
+            state.compareFontBIndex = state.compareFontAIndex === 0 ? 1 : 0;
+        }
+        renderCompareView();
+    }
+
+    function setCompareFontB(idx) {
+        state.compareFontBIndex = parseInt(idx);
+        if (state.compareFontAIndex === state.compareFontBIndex) {
+            state.compareFontAIndex = state.compareFontBIndex === 0 ? 1 : 0;
+        }
+        renderCompareView();
+    }
+
+    function mergeSingleGlyph(direction) {
+        const charList = getCompareCharList();
+        const cp = charList[state.compareCharIndex];
+        
+        const srcIdx = direction === 'a-to-b' ? state.compareFontAIndex : state.compareFontBIndex;
+        const dstIdx = direction === 'a-to-b' ? state.compareFontBIndex : state.compareFontAIndex;
+        
+        const srcFont = workspace.fonts[srcIdx];
+        const dstFont = workspace.fonts[dstIdx];
+        const srcGlyph = srcFont.glyphs[cp];
+        
+        if (!srcGlyph) {
+            alert('源字体中没有该字形');
+            return;
+        }
+        
+        const char = String.fromCodePoint(cp);
+        if (confirm(`确定将字符 "${char}" 从 ${srcFont.metadata.name} 合并到 ${dstFont.metadata.name} 吗？`)) {
+            saveHistory();
+            dstFont.glyphs[cp] = {
+                width: srcGlyph.width,
+                height: srcGlyph.height,
+                pixels: [...srcGlyph.pixels],
+                modified: true
+            };
+            renderCompareView();
+            renderAll();
+            alert('合并完成');
+        }
+    }
+
+    function mergeAllGlyphs(direction) {
+        const srcIdx = direction === 'a-to-b' ? state.compareFontAIndex : state.compareFontBIndex;
+        const dstIdx = direction === 'a-to-b' ? state.compareFontBIndex : state.compareFontAIndex;
+        
+        const srcFont = workspace.fonts[srcIdx];
+        const dstFont = workspace.fonts[dstIdx];
+        
+        const nonEmptyGlyphs = Object.keys(srcFont.glyphs).filter(cp => {
+            const g = srcFont.glyphs[cp];
+            return g && g.pixels.some(row => row.includes('1'));
         });
         
-        document.querySelectorAll('.tool-btn[data-action]').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const action = btn.dataset.action;
-                switch (action) {
-                    case 'flip-h': flipHorizontal(); break;
-                    case 'flip-v': flipVertical(); break;
-                    case 'flip-d': flipDiagonal(); break;
-                    case 'move-up': moveGlyph('up'); break;
-                    case 'move-down': moveGlyph('down'); break;
-                    case 'move-left': moveGlyph('left'); break;
-                    case 'move-right': moveGlyph('right'); break;
-                    case 'undo': undo(); break;
-                    case 'redo': redo(); break;
-                    case 'clear': clearGlyph(); break;
-                }
-            });
-        });
+        if (nonEmptyGlyphs.length === 0) {
+            alert('源字体中没有非空字形');
+            return;
+        }
         
+        if (confirm(`确定将 ${nonEmptyGlyphs.length} 个非空字形从 ${srcFont.metadata.name} 全部合并到 ${dstFont.metadata.name} 吗？\n目标字体中的同名字形会被覆盖。`)) {
+            saveHistory();
+            nonEmptyGlyphs.forEach(cp => {
+                const srcGlyph = srcFont.glyphs[cp];
+                dstFont.glyphs[cp] = {
+                    width: srcGlyph.width,
+                    height: srcGlyph.height,
+                    pixels: [...srcGlyph.pixels],
+                    modified: true
+                };
+            });
+            renderCompareView();
+            renderAll();
+            alert(`成功合并 ${nonEmptyGlyphs.length} 个字形`);
+        }
+    }
+
+    function setupEventListeners() {
         canvas.addEventListener('mousedown', handleCanvasMouseDown);
         canvas.addEventListener('mousemove', handleCanvasMouseMove);
         canvas.addEventListener('mouseup', handleCanvasMouseUp);
         canvas.addEventListener('mouseleave', handleCanvasMouseUp);
         
-        ligatureCanvas.addEventListener('mousedown', handleLigatureMouseDown);
-        ligatureCanvas.addEventListener('mousemove', handleLigatureMouseMove);
-        ligatureCanvas.addEventListener('mouseup', handleLigatureMouseUp);
-        ligatureCanvas.addEventListener('mouseleave', handleLigatureMouseUp);
+        document.getElementById('btn-settings').onclick = () => openSettings('size');
+        document.getElementById('btn-export').onclick = () => exportJSON();
+        document.getElementById('btn-import').onclick = () => document.getElementById('import-file').click();
+        document.getElementById('btn-bdf').onclick = () => exportBDF();
+        document.getElementById('btn-export-gif').onclick = () => exportGIF();
+        document.getElementById('btn-compare').onclick = () => toggleCompareMode();
         
-        document.getElementById('charset-search').addEventListener('input', (e) => {
-            state.searchFilter = e.target.value;
-            renderCharsetGrid();
-        });
-        
-        document.getElementById('btn-batch-import').addEventListener('click', () => {
-            showModal('batch-import-modal');
-        });
-        
-        document.getElementById('btn-batch-import-confirm').addEventListener('click', () => {
-            const text = document.getElementById('batch-import-text').value;
-            const count = batchImport(text);
-            alert(`已为 ${count} 个新字符创建空白模板！`);
-            document.getElementById('batch-import-text').value = '';
-            hideModal('batch-import-modal');
-        });
-        
-        document.getElementById('preview-text').addEventListener('input', () => {
-            resetAnimation();
-        });
-        document.getElementById('preview-scale').addEventListener('change', () => {
-            resetAnimation();
-        });
-        document.getElementById('preview-linewidth').addEventListener('input', () => {
-            resetAnimation();
-        });
-        document.getElementById('preview-linespacing').addEventListener('input', () => {
-            resetAnimation();
-        });
-        document.getElementById('preview-fps').addEventListener('change', (e) => {
-            effectsState.fps = parseInt(e.target.value);
-        });
-
-        document.getElementById('effect-type-select').addEventListener('change', (e) => {
-            if (e.target.value) {
-                addEffect(e.target.value);
-                e.target.value = '';
-            }
-        });
-
-        document.getElementById('btn-play-pause').addEventListener('click', togglePlayPause);
-        document.getElementById('btn-export-gif').addEventListener('click', exportGIF);
-
-        document.getElementById('btn-export-png').addEventListener('click', exportPNG);
-        document.getElementById('btn-export-json').addEventListener('click', exportJSON);
-        document.getElementById('btn-export-bdf').addEventListener('click', exportBDF);
-        
-        document.getElementById('btn-import-json').addEventListener('click', () => {
-            document.getElementById('file-import-json').click();
-        });
-        
-        document.getElementById('file-import-json').addEventListener('change', (e) => {
+        document.getElementById('import-file').onchange = (e) => {
             if (e.target.files[0]) {
                 importJSON(e.target.files[0]);
             }
+            e.target.value = '';
+        };
+        
+        document.getElementById('btn-undo').onclick = () => undo();
+        document.getElementById('btn-redo').onclick = () => redo();
+        
+        document.getElementById('btn-tab-glyphs').onclick = () => {
+            state.currentTab = 'glyphs';
+            updateTabs();
+            renderEditor();
+            renderGlyphSet();
+            updateCurrentCharInfo();
+        };
+        document.getElementById('btn-tab-ligatures').onclick = () => {
+            state.currentTab = 'ligatures';
+            const font = getCurrentFont();
+            const ligKeys = Object.keys(font.ligatures);
+            if (ligKeys.length > 0 && !state.currentLigature) {
+                state.currentLigature = ligKeys[0];
+            }
+            updateTabs();
+            renderEditor();
+            renderGlyphSet();
+            updateCurrentCharInfo();
+        };
+        
+        document.getElementById('glyph-filter').oninput = (e) => {
+            state.glyphFilter = e.target.value;
+            renderGlyphSet();
+        };
+        
+        document.getElementById('btn-add-glyph').onclick = () => {
+            const input = prompt('请输入要添加的字符：');
+            if (input && input.length > 0) {
+                const cp = input.codePointAt(0);
+                ensureGlyph(cp);
+                state.currentCodePoint = cp;
+                state.currentTab = 'glyphs';
+                saveHistory();
+                updateTabs();
+                renderAll();
+            }
+        };
+        
+        document.getElementById('btn-clear-glyph').onclick = () => clearGlyph();
+        document.getElementById('btn-copy-glyph').onclick = () => copyGlyph();
+        document.getElementById('btn-paste-glyph').onclick = () => pasteGlyph();
+        document.getElementById('btn-delete-glyph').onclick = () => deleteCurrentGlyph();
+        
+        document.getElementById('btn-flip-h').onclick = () => createVariant('flip-h');
+        document.getElementById('btn-flip-v').onclick = () => createVariant('flip-v');
+        document.getElementById('btn-rotate-cw').onclick = () => createVariant('rotate-cw');
+        document.getElementById('btn-rotate-ccw').onclick = () => createVariant('rotate-ccw');
+        document.getElementById('btn-bold').onclick = () => createVariant('bold');
+        
+        document.getElementById('btn-shift-left').onclick = () => createVariant('shift-left');
+        document.getElementById('btn-shift-right').onclick = () => createVariant('shift-right');
+        document.getElementById('btn-shift-up').onclick = () => createVariant('shift-up');
+        document.getElementById('btn-shift-down').onclick = () => createVariant('shift-down');
+        
+        document.getElementById('preview-text').oninput = () => {
+            renderPreview();
+        };
+        document.getElementById('preview-scale').onchange = (e) => {
+            previewState.scale = parseInt(e.target.value);
+            renderPreview();
+        };
+        document.getElementById('preview-fps').onchange = (e) => {
+            previewState.fps = parseInt(e.target.value);
+        };
+        document.getElementById('preview-color').onchange = (e) => {
+            previewState.textColor = e.target.value;
+            renderPreview();
+        };
+        document.getElementById('effect-type').onchange = (e) => {
+            previewState.effectType = e.target.value;
+            document.getElementById('wave-controls').style.display = e.target.value === 'wave' ? 'flex' : 'none';
+            document.getElementById('glow-controls').style.display = e.target.value === 'glow' ? 'flex' : 'none';
+            document.getElementById('gradient-controls').style.display = e.target.value === 'gradient' ? 'flex' : 'none';
+            renderPreview();
+        };
+        document.getElementById('wave-amp').oninput = (e) => {
+            previewState.waveAmp = parseInt(e.target.value);
+            renderPreview();
+        };
+        document.getElementById('wave-speed').oninput = (e) => {
+            previewState.waveSpeed = parseFloat(e.target.value);
+            renderPreview();
+        };
+        document.getElementById('wave-length').oninput = (e) => {
+            previewState.waveLength = parseInt(e.target.value);
+            renderPreview();
+        };
+        document.getElementById('glow-intensity').oninput = (e) => {
+            previewState.glowIntensity = parseInt(e.target.value);
+            renderPreview();
+        };
+        document.getElementById('gradient-color1').oninput = (e) => {
+            previewState.gradientColor1 = e.target.value;
+            renderPreview();
+        };
+        document.getElementById('gradient-color2').oninput = (e) => {
+            previewState.gradientColor2 = e.target.value;
+            renderPreview();
+        };
+        
+        document.getElementById('btn-apply-settings').onclick = () => applySettings();
+        
+        document.querySelectorAll('.settings-tab').forEach(tab => {
+            tab.onclick = () => {
+                const tabName = tab.dataset.tab;
+                document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.settings-pane').forEach(p => p.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById(`settings-${tabName}`).classList.add('active');
+                
+                if (tabName === 'batch') loadBatchPreview();
+                if (tabName === 'kerning') renderKerningList();
+                if (tabName === 'ligatures') renderLigatureList();
+            };
         });
         
-        document.getElementById('btn-settings').addEventListener('click', () => {
-            updateSettingsForm();
-            showModal('settings-modal');
+        document.getElementById('btn-add-kerning').onclick = () => addKerningPair();
+        document.getElementById('btn-add-ligature').onclick = () => addLigature();
+        
+        document.getElementById('batch-import').onchange = (e) => {
+            if (e.target.files.length > 0) {
+                importBatchImages(e.target.files);
+            }
+            e.target.value = '';
+        };
+        
+        document.querySelectorAll('.modal-close').forEach(btn => {
+            btn.onclick = (e) => {
+                const modal = e.target.closest('.modal-overlay');
+                if (modal) hideModal(modal.id);
+            };
         });
         
-        document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
-        
-        document.getElementById('btn-kerning').addEventListener('click', () => {
-            renderKerningList();
-            renderSuggestionList();
-            updateKerningPreview();
-            showModal('kerning-modal');
-        });
-        
-        document.getElementById('kerning-slider').addEventListener('input', updateKerningPreview);
-        document.getElementById('kerning-left').addEventListener('input', updateKerningPreview);
-        document.getElementById('kerning-right').addEventListener('input', updateKerningPreview);
-        document.getElementById('btn-kerning-add').addEventListener('click', addKerning);
-        document.getElementById('btn-kerning-delete').addEventListener('click', deleteKerning);
-        
-        document.getElementById('btn-ligature').addEventListener('click', () => {
-            renderLigatureList();
-            renderLigatureCanvas();
-            showModal('ligature-modal');
-        });
-        
-        document.getElementById('btn-ligature-add').addEventListener('click', addLigature);
-        document.getElementById('btn-ligature-delete').addEventListener('click', deleteLigature);
-        document.getElementById('btn-ligature-width-set').addEventListener('click', setLigatureWidth);
-        
-        document.querySelectorAll('.modal-close, .modal-btn[data-modal]').forEach(btn => {
-            btn.addEventListener('click', () => {
-                hideModal(btn.dataset.modal);
-            });
-        });
-        
-        document.querySelectorAll('.modal').forEach(modal => {
-            modal.addEventListener('click', (e) => {
+        document.querySelectorAll('.modal-overlay').forEach(modal => {
+            modal.onclick = (e) => {
                 if (e.target === modal) {
-                    modal.classList.remove('active');
+                    hideModal(modal.id);
                 }
-            });
+            };
         });
         
-        document.querySelectorAll('.context-menu-item').forEach(item => {
-            item.addEventListener('click', () => {
-                handleContextMenuAction(item.dataset.action);
-            });
+        document.addEventListener('click', () => {
+            hideContextMenu();
+            toggleFontDropdown(false);
         });
         
-        document.addEventListener('click', (e) => {
-            if (!e.target.closest('.context-menu') && !e.target.closest('.charset-item')) {
-                hideContextMenu();
+        document.getElementById('font-selector').onclick = (e) => {
+            e.stopPropagation();
+        };
+        
+        document.getElementById('font-dropdown').onclick = (e) => {
+            e.stopPropagation();
+        };
+        
+        document.getElementById('compare-font-a').onchange = (e) => setCompareFontA(e.target.value);
+        document.getElementById('compare-font-b').onchange = (e) => setCompareFontB(e.target.value);
+        document.getElementById('btn-prev-char').onclick = () => prevCompareChar();
+        document.getElementById('btn-next-char').onclick = () => nextCompareChar();
+        document.getElementById('btn-merge-a-to-b').onclick = () => mergeSingleGlyph('a-to-b');
+        document.getElementById('btn-merge-b-to-a').onclick = () => mergeSingleGlyph('b-to-a');
+        document.getElementById('btn-merge-all-a-to-b').onclick = () => mergeAllGlyphs('a-to-b');
+        document.getElementById('btn-merge-all-b-to-a').onclick = () => mergeAllGlyphs('b-to-a');
+        document.getElementById('btn-close-compare').onclick = () => toggleCompareMode();
+        
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+            if (state.compareMode) {
+                if (e.key === 'ArrowLeft') {
+                    e.preventDefault();
+                    prevCompareChar();
+                } else if (e.key === 'ArrowRight') {
+                    e.preventDefault();
+                    nextCompareChar();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    toggleCompareMode();
+                }
+                return;
+            }
+            
+            if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+                e.preventDefault();
+                if (e.shiftKey) {
+                    redo();
+                } else {
+                    undo();
+                }
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+                e.preventDefault();
+                redo();
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                e.preventDefault();
+                exportJSON();
+            }
+            if (e.key === 'Escape') {
+                document.querySelectorAll('.modal-overlay.active').forEach(m => {
+                    hideModal(m.id);
+                });
             }
         });
         
-        document.addEventListener('keydown', (e) => {
-            if (e.ctrlKey || e.metaKey) {
-                if (e.key === 'z') {
-                    e.preventDefault();
-                    if (e.shiftKey) {
-                        redo();
-                    } else {
-                        undo();
-                    }
-                } else if (e.key === 'y') {
-                    e.preventDefault();
-                    redo();
-                } else if (e.key === 's') {
-                    e.preventDefault();
-                    exportJSON();
-                }
+        window.addEventListener('resize', () => {
+            if (!state.compareMode) {
+                renderPreview();
             }
         });
     }
@@ -3015,57 +3039,47 @@ const PixelFontEditor = (function() {
         ctx = canvas.getContext('2d');
         previewCanvas = document.getElementById('preview-canvas');
         previewCtx = previewCanvas.getContext('2d');
-        ligatureCanvas = document.getElementById('ligature-canvas');
-        ligatureCtx = ligatureCanvas.getContext('2d');
         
-        createDemoFont();
-        initEventListeners();
-        clearHistory();
-
-        effectsState.effects = [
-            {
-                id: 1,
-                type: 'gradient',
-                enabled: true,
-                params: {
-                    direction: 'vertical',
-                    startColor: '#3b82f6',
-                    endColor: '#8b5cf6'
-                }
-            },
-            {
-                id: 2,
-                type: 'wave',
-                enabled: true,
-                params: {
-                    amplitude: 2,
-                    frequency: 0.3
-                }
-            }
+        workspace.fonts = [
+            createDemoFont('Regular', 0),
+            createDemoFont('Bold', 1)
         ];
-
-        renderEffectsPanel();
+        workspace.currentFontIndex = 0;
         
-        renderGlyphCanvas();
-        renderCharsetGrid();
-        renderPreview();
-        updateCurrentCharInfo();
-
-        if (hasDynamicEffects()) {
-            startAnimation();
-        }
+        state.currentCodePoint = 65;
+        
+        setupEventListeners();
+        renderAll();
+        renderFontSelector();
+        updateTabs();
+        
+        document.getElementById('preview-text').value = '(font:Bold)PIXEL (font:Regular)Font Designer';
+        
+        document.getElementById('effect-type').value = 'none';
+        document.getElementById('wave-controls').style.display = 'none';
+        document.getElementById('glow-controls').style.display = 'none';
+        document.getElementById('gradient-controls').style.display = 'none';
+        
+        startPreviewAnimation();
     }
 
     return {
-        init,
-        renderPreview,
-        exportJSON,
-        exportBDF,
-        exportPNG,
-        exportGIF
+        getWorkspace: () => workspace,
+        getCurrentFont: getCurrentFont,
+        switchFont: switchFont,
+        addBlankFont: addBlankFont,
+        duplicateFont: duplicateFont,
+        deleteFont: deleteFont,
+        renameFont: renameFont,
+        exportJSON: exportJSON,
+        importJSON: importJSON,
+        exportBDF: exportBDF,
+        toggleCompareMode: toggleCompareMode,
+        init: init
     };
 })();
 
 document.addEventListener('DOMContentLoaded', () => {
+    window.pixelFontEditor = PixelFontEditor;
     PixelFontEditor.init();
 });
