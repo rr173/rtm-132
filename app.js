@@ -110,21 +110,25 @@ const PixelFontEditor = (function() {
         }
     }
 
-    function saveHistory() {
+    function pushHistorySnapshot() {
         const currentGlyph = getGlyph(state.currentCodePoint);
         const snapshot = {
             codePoint: state.currentCodePoint,
             glyph: cloneGlyph(currentGlyph)
         };
-        
+
         state.history = state.history.slice(0, state.historyIndex + 1);
         state.history.push(snapshot);
-        
+
         if (state.history.length > MAX_HISTORY) {
             state.history.shift();
         } else {
             state.historyIndex++;
         }
+    }
+
+    function saveHistory() {
+        pushHistorySnapshot();
     }
 
     function undo() {
@@ -154,6 +158,7 @@ const PixelFontEditor = (function() {
     function clearHistory() {
         state.history = [];
         state.historyIndex = -1;
+        pushHistorySnapshot();
     }
 
     function renderGlyphCanvas() {
@@ -290,6 +295,7 @@ const PixelFontEditor = (function() {
         state.isDrawing = true;
         state.lastMouseX = x;
         state.lastMouseY = y;
+        state.drawingModified = false;
         
         if (state.currentTool === 'line' || state.currentTool === 'rect') {
             if (!state.lineStart) {
@@ -299,15 +305,29 @@ const PixelFontEditor = (function() {
             }
         }
         
-        saveHistory();
-        
         if (state.currentTool === 'line' && state.lineStart) {
             bresenhamLine(state.lineStart.x, state.lineStart.y, x, y, (lx, ly) => {
                 setPixel(glyph, lx, ly, 1);
             });
             state.lineStart = null;
+            saveHistory();
+            state.drawingModified = false;
+        } else if (state.currentTool === 'rect' && state.lineStart) {
+            const sx = Math.min(state.lineStart.x, x);
+            const ex = Math.max(state.lineStart.x, x);
+            const sy = Math.min(state.lineStart.y, y);
+            const ey = Math.max(state.lineStart.y, y);
+            for (let ry = sy; ry <= ey; ry++) {
+                for (let rx = sx; rx <= ex; rx++) {
+                    setPixel(glyph, rx, ry, 1);
+                }
+            }
+            state.lineStart = null;
+            saveHistory();
+            state.drawingModified = false;
         } else {
             applyTool(x, y, glyph, canvas);
+            state.drawingModified = true;
         }
         
         renderGlyphCanvas();
@@ -334,13 +354,18 @@ const PixelFontEditor = (function() {
         
         const glyph = getGlyph(state.currentCodePoint);
         applyTool(x, y, glyph, canvas);
+        state.drawingModified = true;
         renderGlyphCanvas();
         renderCharsetGrid();
         renderPreview();
     }
 
     function handleCanvasMouseUp() {
+        if (state.isDrawing && state.drawingModified) {
+            saveHistory();
+        }
         state.isDrawing = false;
+        state.drawingModified = false;
     }
 
     function handleLigatureMouseDown(e) {
@@ -394,9 +419,9 @@ const PixelFontEditor = (function() {
 
     function flipHorizontal() {
         const glyph = getGlyph(state.currentCodePoint);
-        saveHistory();
         glyph.pixels = glyph.pixels.map(row => row.split('').reverse().join(''));
         glyph.modified = true;
+        saveHistory();
         renderGlyphCanvas();
         renderCharsetGrid();
         renderPreview();
@@ -404,9 +429,9 @@ const PixelFontEditor = (function() {
 
     function flipVertical() {
         const glyph = getGlyph(state.currentCodePoint);
-        saveHistory();
         glyph.pixels.reverse();
         glyph.modified = true;
+        saveHistory();
         renderGlyphCanvas();
         renderCharsetGrid();
         renderPreview();
@@ -414,7 +439,6 @@ const PixelFontEditor = (function() {
 
     function flipDiagonal() {
         const glyph = getGlyph(state.currentCodePoint);
-        saveHistory();
         const newPixels = [];
         for (let x = 0; x < glyph.width; x++) {
             let newRow = '';
@@ -428,6 +452,7 @@ const PixelFontEditor = (function() {
         glyph.width = glyph.height;
         glyph.height = temp;
         glyph.modified = true;
+        saveHistory();
         renderGlyphCanvas();
         renderCharsetGrid();
         renderPreview();
@@ -435,7 +460,6 @@ const PixelFontEditor = (function() {
 
     function moveGlyph(direction) {
         const glyph = getGlyph(state.currentCodePoint);
-        saveHistory();
         const w = glyph.width;
         const h = glyph.height;
         
@@ -452,6 +476,7 @@ const PixelFontEditor = (function() {
         }
         
         glyph.modified = true;
+        saveHistory();
         renderGlyphCanvas();
         renderCharsetGrid();
         renderPreview();
@@ -459,9 +484,9 @@ const PixelFontEditor = (function() {
 
     function clearGlyph() {
         const glyph = getGlyph(state.currentCodePoint);
-        saveHistory();
         glyph.pixels = glyph.pixels.map(() => '0'.repeat(glyph.width));
         glyph.modified = true;
+        saveHistory();
         renderGlyphCanvas();
         renderCharsetGrid();
         renderPreview();
@@ -668,7 +693,7 @@ const PixelFontEditor = (function() {
         }
         
         const totalHeight = lines.length * (glyphHeight + lineSpacing) * scale;
-        const totalWidth = Math.min(lineWidth, Math.max(...lines.map(line => {
+        const maxLineWidthPx = Math.max(...lines.map(line => {
             let w = 0;
             line.forEach((item, idx) => {
                 if (item.type === 'ligature') {
@@ -685,9 +710,11 @@ const PixelFontEditor = (function() {
                 }
             });
             return w * scale;
-        })));
+        }), 100);
+        const maxAllowedWidthPx = lineWidth * scale;
+        const totalWidth = Math.max(maxLineWidthPx, maxAllowedWidthPx);
         
-        previewCanvas.width = Math.max(totalWidth, 100);
+        previewCanvas.width = totalWidth;
         previewCanvas.height = Math.max(totalHeight, 50);
         
         previewCtx.fillStyle = '#0f0f23';
@@ -925,12 +952,16 @@ const PixelFontEditor = (function() {
         const newBaseline = parseInt(document.getElementById('setting-baseline').value);
         const newDescent = parseInt(document.getElementById('setting-descent').value);
         
-        if (newAscent + newDescent > newHeight) {
-            alert('上升线 + 下降线 不能超过字形高度！');
+        if (newAscent > newHeight) {
+            alert('上升线位置不能超过字形高度！');
             return;
         }
-        if (newBaseline > newDescent) {
-            alert('基线位置不能大于下降线位置！');
+        if (newBaseline > newAscent) {
+            alert('基线位置不能大于上升线位置！');
+            return;
+        }
+        if (newDescent > newBaseline) {
+            alert('下降线位置不能大于基线位置！');
             return;
         }
         
@@ -1189,6 +1220,7 @@ const PixelFontEditor = (function() {
             delete fontData.glyphs[codePoint];
             if (state.currentCodePoint === codePoint) {
                 state.currentCodePoint = 0x41;
+                clearHistory();
                 updateCurrentCharInfo();
             }
             renderGlyphCanvas();
@@ -2071,6 +2103,7 @@ const PixelFontEditor = (function() {
         
         createDemoFont();
         initEventListeners();
+        clearHistory();
         
         renderGlyphCanvas();
         renderCharsetGrid();
