@@ -1472,6 +1472,9 @@ const PixelFontEditor = (function() {
             return;
         }
         
+        const exportBtn = document.getElementById('btn-export-gif');
+        const originalText = exportBtn.textContent;
+        
         const text = document.getElementById('preview-text').value;
         const scale = previewState.scale;
         const fps = previewState.fps;
@@ -1493,8 +1496,6 @@ const PixelFontEditor = (function() {
         const encoder = new GIFEncoder(totalWidth, totalHeight);
         const delay = Math.round(1000 / fps);
 
-        const exportBtn = document.getElementById('btn-export-gif');
-        const originalText = exportBtn.textContent;
         exportBtn.disabled = true;
 
         for (let frame = 0; frame < totalFrames; frame++) {
