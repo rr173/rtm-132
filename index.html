@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>像素字体设计器</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <header class="menu-bar">
+            <div class="menu-left">
+                <h1 class="app-title">像素字体设计器</h1>
+            </div>
+            <div class="menu-right">
+                <button id="btn-import-json" class="menu-btn">导入 JSON</button>
+                <button id="btn-export-json" class="menu-btn">导出 JSON</button>
+                <button id="btn-export-bdf" class="menu-btn">导出 BDF</button>
+                <button id="btn-kerning" class="menu-btn">字距调整</button>
+                <button id="btn-ligature" class="menu-btn">连字编辑</button>
+                <button id="btn-settings" class="menu-btn">设置</button>
+            </div>
+            <input type="file" id="file-import-json" accept=".json" style="display: none;">
+        </header>
+
+        <main class="main-content">
+            <section class="editor-section">
+                <div class="editor-toolbar">
+                    <div class="tool-group">
+                        <button class="tool-btn active" data-tool="pencil" title="画笔">
+                            <svg viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M15.502 1.94a.5.5 0 0 1 0 .706L14.459 3.69l-2-2L13.502.646a.5.5 0 0 1 .707 0l1.293 1.293zm-1.75 2.456-2-2L4.939 9.21a.5.5 0 0 0-.121.196l-.805 2.414a.25.25 0 0 0 .316.316l2.414-.805a.5.5 0 0 0 .196-.12l6.813-6.814z"/></svg>
+                        </button>
+                        <button class="tool-btn" data-tool="eraser" title="橡皮擦">
+                            <svg viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M8.086 2.207a2 2 0 0 1 2.828 0l4.879 4.879a2 2 0 0 1 0 2.828l-6.42 6.42a2 2 0 0 1-2.828 0L.808 10.515a2 2 0 0 1 0-2.829l7.278-7.279Z"/></svg>
+                        </button>
+                        <button class="tool-btn" data-tool="line" title="直线">
+                            <svg viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M14.293.293a1 1 0 0 1 1.414 0l.293.293a1 1 0 0 1 0 1.414L1.707 16.293a1 1 0 0 1-1.414 0l-.293-.293a1 1 0 0 1 0-1.414L14.293.293z" transform="scale(0.8) translate(1.5,1.5)"/></svg>
+                        </button>
+                        <button class="tool-btn" data-tool="rect" title="矩形填充">
+                            <svg viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M0 2.5A1.5 1.5 0 0 1 1.5 1h13A1.5 1.5 0 0 1 16 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 0 13.5v-11z"/></svg>
+                        </button>
+                    </div>
+                    <div class="tool-group">
+                        <button class="tool-btn" data-action="flip-h" title="水平翻转">⇄</button>
+                        <button class="tool-btn" data-action="flip-v" title="垂直翻转">⇅</button>
+                        <button class="tool-btn" data-action="flip-d" title="对角翻转">⤡</button>
+                    </div>
+                    <div class="tool-group">
+                        <button class="tool-btn" data-action="move-up" title="上移">↑</button>
+                        <button class="tool-btn" data-action="move-down" title="下移">↓</button>
+                        <button class="tool-btn" data-action="move-left" title="左移">←</button>
+                        <button class="tool-btn" data-action="move-right" title="右移">→</button>
+                    </div>
+                    <div class="tool-group">
+                        <button class="tool-btn" data-action="undo" title="撤销 (Ctrl+Z)">↶</button>
+                        <button class="tool-btn" data-action="redo" title="重做 (Ctrl+Y)">↷</button>
+                    </div>
+                    <div class="tool-group">
+                        <button class="tool-btn" data-action="clear" title="清空">🗑</button>
+                    </div>
+                </div>
+
+                <div class="editor-header">
+                    <div class="current-char-info">
+                        <span class="char-display" id="current-char-display">A</span>
+                        <span class="char-code" id="current-char-code">U+0041</span>
+                    </div>
+                </div>
+
+                <div class="canvas-container">
+                    <canvas id="glyph-canvas"></canvas>
+                </div>
+            </section>
+
+            <aside class="charset-panel">
+                <div class="panel-header">
+                    <h2>字符集</h2>
+                    <div class="charset-controls">
+                        <input type="text" id="charset-search" placeholder="搜索字符..." class="search-input">
+                        <button id="btn-batch-import" class="small-btn">批量导入</button>
+                    </div>
+                </div>
+                <div class="charset-grid" id="charset-grid"></div>
+            </aside>
+        </main>
+
+        <footer class="preview-section">
+            <div class="preview-controls">
+                <div class="control-group">
+                    <label>文本:</label>
+                    <input type="text" id="preview-text" value="Hello World 2025" class="text-input">
+                </div>
+                <div class="control-group">
+                    <label>倍率:</label>
+                    <select id="preview-scale">
+                        <option value="1">1x</option>
+                        <option value="2">2x</option>
+                        <option value="3" selected>3x</option>
+                        <option value="4">4x</option>
+                        <option value="5">5x</option>
+                        <option value="6">6x</option>
+                        <option value="7">7x</option>
+                        <option value="8">8x</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label>行宽:</label>
+                    <input type="number" id="preview-linewidth" value="600" min="100" max="2000" step="10" class="number-input">
+                </div>
+                <div class="control-group">
+                    <label>行间距:</label>
+                    <input type="number" id="preview-linespacing" value="4" min="0" max="20" step="1" class="number-input">
+                </div>
+                <div class="control-group">
+                    <button id="btn-export-png" class="small-btn">导出 PNG</button>
+                </div>
+            </div>
+            <div class="preview-canvas-container">
+                <canvas id="preview-canvas"></canvas>
+            </div>
+        </footer>
+    </div>
+
+    <div class="modal" id="settings-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>字体设置</h2>
+                <button class="modal-close" data-modal="settings-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>字体名称</label>
+                    <input type="text" id="setting-name" class="form-input">
+                </div>
+                <div class="form-group">
+                    <label>作者</label>
+                    <input type="text" id="setting-author" class="form-input">
+                </div>
+                <div class="form-group">
+                    <label>版本号</label>
+                    <input type="text" id="setting-version" class="form-input" value="1.0">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>字形宽度</label>
+                        <input type="number" id="setting-glyph-width" class="form-input" min="6" max="16" value="8">
+                    </div>
+                    <div class="form-group">
+                        <label>字形高度</label>
+                        <input type="number" id="setting-glyph-height" class="form-input" min="8" max="24" value="12">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>上升线 (ascent)</label>
+                        <input type="number" id="setting-ascent" class="form-input" min="1" max="23" value="10">
+                    </div>
+                    <div class="form-group">
+                        <label>基线 (baseline)</label>
+                        <input type="number" id="setting-baseline" class="form-input" min="1" max="23" value="2">
+                    </div>
+                    <div class="form-group">
+                        <label>下降线 (descent)</label>
+                        <input type="number" id="setting-descent" class="form-input" min="0" max="22" value="0">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>默认字间距</label>
+                    <input type="number" id="setting-default-spacing" class="form-input" min="0" max="10" value="1">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn secondary" data-modal="settings-modal">取消</button>
+                <button class="modal-btn primary" id="btn-save-settings">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="kerning-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>字距调整 (Kerning)</h2>
+                <button class="modal-close" data-modal="kerning-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="kerning-controls">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>左字符</label>
+                            <input type="text" id="kerning-left" class="form-input" maxlength="1" value="A">
+                        </div>
+                        <div class="form-group">
+                            <label>右字符</label>
+                            <input type="text" id="kerning-right" class="form-input" maxlength="1" value="V">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>间距调整: <span id="kerning-value">0</span> px</label>
+                        <input type="range" id="kerning-slider" min="-3" max="3" value="0" step="1" class="slider">
+                    </div>
+                    <div class="kerning-preview">
+                        <span>预览: </span>
+                        <span id="kerning-preview-text">AV</span>
+                    </div>
+                    <div class="form-row">
+                        <button class="small-btn" id="btn-kerning-add">添加/更新</button>
+                        <button class="small-btn" id="btn-kerning-delete">删除</button>
+                    </div>
+                </div>
+                <div class="kerning-list-container">
+                    <h3>现有字距规则</h3>
+                    <div class="kerning-list" id="kerning-list"></div>
+                </div>
+                <div class="kerning-suggestions">
+                    <h3>建议字距对</h3>
+                    <div class="suggestion-list" id="suggestion-list"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn secondary" data-modal="kerning-modal">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="ligature-modal">
+        <div class="modal-content wide">
+            <div class="modal-header">
+                <h2>连字编辑 (Ligature)</h2>
+                <button class="modal-close" data-modal="ligature-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="ligature-controls">
+                    <div class="form-group">
+                        <label>字符序列 (如: fi, ff, ffi)</label>
+                        <input type="text" id="ligature-chars" class="form-input" placeholder="输入字符序列">
+                    </div>
+                    <div class="form-row">
+                        <button class="small-btn" id="btn-ligature-add">添加连字</button>
+                        <button class="small-btn" id="btn-ligature-delete">删除连字</button>
+                    </div>
+                </div>
+                <div class="ligature-list-container">
+                    <h3>现有连字规则</h3>
+                    <div class="ligature-list" id="ligature-list"></div>
+                </div>
+                <div class="ligature-editor-container">
+                    <h3>连字字形编辑</h3>
+                    <div class="ligature-glyph-width">
+                        <label>连字宽度:</label>
+                        <input type="number" id="ligature-width" min="6" max="32" value="16" class="number-input">
+                        <button class="small-btn" id="btn-ligature-width-set">设置</button>
+                    </div>
+                    <div class="ligature-canvas-container">
+                        <canvas id="ligature-canvas"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn secondary" data-modal="ligature-modal">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="batch-import-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>批量导入字符</h2>
+                <button class="modal-close" data-modal="batch-import-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>粘贴文本，系统将为其中尚未定义的字符创建空白模板</label>
+                    <textarea id="batch-import-text" class="form-input" rows="6" placeholder="在此粘贴文本..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn secondary" data-modal="batch-import-modal">取消</button>
+                <button class="modal-btn primary" id="btn-batch-import-confirm">导入</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="context-menu" id="glyph-context-menu">
+        <div class="context-menu-item" data-action="copy">复制到...</div>
+        <div class="context-menu-item" data-action="variant">创建变体</div>
+        <div class="context-menu-item danger" data-action="delete">删除</div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
