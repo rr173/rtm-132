@@ -83,7 +83,11 @@ const PixelFontEditor = (function() {
         textColor: '#ffffff',
         scale: 3,
         lineWidth: 800,
-        lineSpacing: 2
+        lineSpacing: 2,
+        textAlign: 'left',
+        letterSpacing: 0,
+        arcEnabled: false,
+        arcRadius: 80
     };
 
     let canvas, ctx, previewCanvas, previewCtx;
@@ -1524,7 +1528,14 @@ const PixelFontEditor = (function() {
             originalGlyph.pixels = [...state.playbackGlyph.pixels];
         }
 
-        renderPreview();
+        const arcEnabled = previewState.arcEnabled;
+        if (arcEnabled) {
+            previewState.arcEnabled = false;
+            renderPreview();
+            previewState.arcEnabled = true;
+        } else {
+            renderPreview();
+        }
 
         if (originalGlyph && tempBackup) {
             originalGlyph.width = tempBackup.width;
@@ -2223,6 +2234,9 @@ const PixelFontEditor = (function() {
         const segments = parseFontTags(text);
         const lineWidth = previewState.lineWidth;
         const lineSpacing = previewState.lineSpacing;
+        const letterSpacing = previewState.letterSpacing;
+        const textAlign = previewState.textAlign;
+        const arcEnabled = previewState.arcEnabled;
 
         const lines = [];
         let currentLine = [];
@@ -2241,7 +2255,7 @@ const PixelFontEditor = (function() {
 
         function flushWord() {
             if (currentWord.length > 0) {
-                if (currentWidth + currentWordWidth > lineWidth && currentLine.length > 0) {
+                if (!arcEnabled && currentWidth + currentWordWidth > lineWidth && currentLine.length > 0) {
                     lines.push({ chars: currentLine, height: maxGlyphHeight });
                     currentLine = [];
                     currentWidth = 0;
@@ -2267,7 +2281,7 @@ const PixelFontEditor = (function() {
 
                 if (item.type === 'ligature') {
                     glyph = item.glyph;
-                    itemWidth = item.glyph.width + defaultSpacing;
+                    itemWidth = item.glyph.width + defaultSpacing + letterSpacing;
                 } else {
                     glyph = item.glyph || createEmptyGlyph(font.metadata.glyphWidth, font.metadata.glyphHeight);
                     let kerningOffset = 0;
@@ -2276,10 +2290,13 @@ const PixelFontEditor = (function() {
                         const kerningKey = prevChar + item.char;
                         kerningOffset = font.kerning[kerningKey] || 0;
                     }
-                    itemWidth = glyph.width + defaultSpacing + kerningOffset;
+                    itemWidth = glyph.width + defaultSpacing + kerningOffset + letterSpacing;
                 }
 
-                if (item.type === 'char' && (item.char === ' ' || item.char === '\n')) {
+                if (arcEnabled) {
+                    currentLine.push({ ...item, glyph, width: itemWidth, x: currentWidth, fontName: segment.fontName });
+                    currentWidth += itemWidth * scale;
+                } else if (item.type === 'char' && (item.char === ' ' || item.char === '\n')) {
                     flushWord();
                     if (item.char === '\n') {
                         lines.push({ chars: currentLine, height: maxGlyphHeight });
@@ -2306,7 +2323,34 @@ const PixelFontEditor = (function() {
         lines.forEach(line => {
             let x = 0;
             const layoutChars = [];
-            
+            let lineTotalWidth = 0;
+
+            line.chars.forEach((item, idx) => {
+                const font = getFontByName(item.fontName);
+                if (!font) return;
+
+                if (item.type === 'char' && idx > 0) {
+                    const prevItem = line.chars[idx - 1];
+                    if (prevItem.type === 'char' && prevItem.fontName === item.fontName) {
+                        const kerningKey = prevItem.char + item.char;
+                        const kerningOffset = font.kerning[kerningKey] || 0;
+                        lineTotalWidth += kerningOffset * scale;
+                    }
+                }
+                lineTotalWidth += item.width * scale;
+            });
+
+            let startX = 0;
+            if (!arcEnabled) {
+                if (textAlign === 'center') {
+                    startX = (lineWidth - lineTotalWidth) / 2;
+                } else if (textAlign === 'right') {
+                    startX = lineWidth - lineTotalWidth;
+                }
+            }
+
+            x = startX;
+
             line.chars.forEach((item, idx) => {
                 const font = getFontByName(item.fontName);
                 if (!font) return;
@@ -2331,13 +2375,13 @@ const PixelFontEditor = (function() {
                 });
                 x += item.width * scale;
             });
-            layoutLines.push({ chars: layoutChars, y: y, width: x, height: line.height });
+            layoutLines.push({ chars: layoutChars, y: y, width: lineTotalWidth, startX: startX, height: line.height });
             y += (line.height + lineSpacing) * scale;
         });
 
         return {
             lines: layoutLines,
-            totalWidth: Math.max(...layoutLines.map(l => l.width), 100),
+            totalWidth: Math.max(...layoutLines.map(l => l.width), 100, arcEnabled ? 0 : lineWidth),
             totalHeight: y
         };
     }
@@ -2356,6 +2400,110 @@ const PixelFontEditor = (function() {
                     );
                 }
             }
+        }
+    }
+
+    function drawRotatedGlyphPixel(targetCtx, glyph, centerX, centerY, scale, angle, color) {
+        const rgb = hexToRgb(color);
+        const w = glyph.width;
+        const h = glyph.height;
+        const halfW = w / 2;
+        const halfH = h / 2;
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+
+        for (let gy = 0; gy < h; gy++) {
+            for (let gx = 0; gx < w; gx++) {
+                if (getPixel(glyph, gx, gy)) {
+                    const localX = (gx - halfW) * scale;
+                    const localY = (gy - halfH) * scale;
+                    
+                    for (let py = 0; py < scale; py++) {
+                        for (let px = 0; px < scale; px++) {
+                            const pxLocal = localX + px;
+                            const pyLocal = localY + py;
+                            
+                            const rotatedX = pxLocal * cos - pyLocal * sin;
+                            const rotatedY = pxLocal * sin + pyLocal * cos;
+                            
+                            const targetX = Math.round(centerX + rotatedX);
+                            const targetY = Math.round(centerY + rotatedY);
+                            
+                            targetCtx.fillStyle = `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
+                            targetCtx.fillRect(targetX, targetY, 1, 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    function renderArcText(targetCtx, text, scale, targetWidth, targetHeight) {
+        const segments = parseFontTags(text);
+        const arcRadius = previewState.arcRadius * scale;
+        const letterSpacing = previewState.letterSpacing * scale;
+        const color = previewState.textColor;
+
+        let totalArcLength = 0;
+        const charWidths = [];
+        const glyphs = [];
+
+        segments.forEach(segment => {
+            const font = getFontByName(segment.fontName);
+            if (!font) return;
+
+            const processed = processTextWithFont(segment.text, font);
+            const defaultSpacing = font.metadata.defaultSpacing * scale;
+
+            for (let i = 0; i < processed.length; i++) {
+                const item = processed[i];
+                let glyph;
+
+                if (item.type === 'ligature') {
+                    glyph = item.glyph;
+                } else {
+                    glyph = item.glyph || createEmptyGlyph(font.metadata.glyphWidth, font.metadata.glyphHeight);
+                }
+
+                let kerningOffset = 0;
+                if (i > 0 && processed[i-1].type === 'char' && charWidths.length > 0) {
+                    const prevChar = processed[i-1].char;
+                    const kerningKey = prevChar + item.char;
+                    kerningOffset = (font.kerning[kerningKey] || 0) * scale;
+                }
+
+                const charWidth = glyph.width * scale + defaultSpacing + kerningOffset + letterSpacing;
+                charWidths.push(charWidth);
+                glyphs.push({ glyph, font });
+                totalArcLength += charWidth;
+            }
+        });
+
+        if (glyphs.length === 0) return;
+
+        const arcAngle = totalArcLength / arcRadius;
+        const startAngle = Math.PI / 2 + arcAngle / 2;
+
+        const centerX = targetWidth / 2;
+        const centerY = targetHeight / 2 + arcRadius;
+
+        let currentAngle = startAngle;
+
+        for (let i = 0; i < glyphs.length; i++) {
+            const { glyph, font } = glyphs[i];
+            const charWidth = charWidths[i];
+            const charAngle = charWidth / arcRadius;
+
+            const midAngle = currentAngle - charAngle / 2;
+
+            const charCenterX = centerX + arcRadius * Math.cos(midAngle);
+            const charCenterY = centerY - arcRadius * Math.sin(midAngle);
+
+            const rotationAngle = midAngle - Math.PI / 2;
+
+            drawRotatedGlyphPixel(targetCtx, glyph, charCenterX, charCenterY, scale, rotationAngle, color);
+
+            currentAngle -= charAngle;
         }
     }
 
@@ -2436,6 +2584,16 @@ const PixelFontEditor = (function() {
     }
 
     function renderFrame(targetCtx, frame, text, scale, targetWidth, targetHeight) {
+        const arcEnabled = previewState.arcEnabled;
+
+        targetCtx.fillStyle = '#0f0f23';
+        targetCtx.fillRect(0, 0, targetWidth, targetHeight);
+
+        if (arcEnabled) {
+            renderArcText(targetCtx, text, scale, targetWidth, targetHeight);
+            return null;
+        }
+
         const layout = getTextLayout(text, scale);
 
         layout.lines.forEach(line => {
@@ -2450,9 +2608,6 @@ const PixelFontEditor = (function() {
         if (effectType === 'wave') {
             applyWaveEffect(layout, scale, frame);
         }
-
-        targetCtx.fillStyle = '#0f0f23';
-        targetCtx.fillRect(0, 0, targetWidth, targetHeight);
 
         if (effectType === 'glow') {
             applyGlowEffect(targetCtx, layout, scale);
@@ -2495,18 +2650,70 @@ const PixelFontEditor = (function() {
     function renderPreview() {
         const text = document.getElementById('preview-text').value;
         const scale = previewState.scale;
+        const arcEnabled = previewState.arcEnabled;
 
-        const layout = getTextLayout(text, scale);
+        let totalWidth, totalHeight;
         const padding = 20;
         const maxEffectOffset = 20;
-        const totalWidth = Math.max(layout.totalWidth + padding * 2, 100);
-        const totalHeight = Math.max(layout.totalHeight + padding * 2 + maxEffectOffset * 2, 50);
+
+        if (arcEnabled) {
+            const arcRadius = previewState.arcRadius * scale;
+            const segments = parseFontTags(text);
+            let totalArcLength = 0;
+            let maxGlyphHeight = 0;
+
+            segments.forEach(segment => {
+                const font = getFontByName(segment.fontName);
+                if (!font) return;
+                if (font.metadata.glyphHeight > maxGlyphHeight) {
+                    maxGlyphHeight = font.metadata.glyphHeight;
+                }
+
+                const processed = processTextWithFont(segment.text, font);
+                const defaultSpacing = font.metadata.defaultSpacing * scale;
+                const letterSpacing = previewState.letterSpacing * scale;
+
+                for (let i = 0; i < processed.length; i++) {
+                    const item = processed[i];
+                    let glyph;
+
+                    if (item.type === 'ligature') {
+                        glyph = item.glyph;
+                    } else {
+                        glyph = item.glyph || createEmptyGlyph(font.metadata.glyphWidth, font.metadata.glyphHeight);
+                    }
+
+                    let kerningOffset = 0;
+                    if (i > 0 && processed[i-1].type === 'char') {
+                        const prevChar = processed[i-1].char;
+                        const kerningKey = prevChar + item.char;
+                        kerningOffset = (font.kerning[kerningKey] || 0) * scale;
+                    }
+
+                    const charWidth = glyph.width * scale + defaultSpacing + kerningOffset + letterSpacing;
+                    totalArcLength += charWidth;
+                }
+            });
+
+            const arcAngle = totalArcLength / arcRadius;
+            const chordWidth = 2 * arcRadius * Math.sin(arcAngle / 2);
+            const glyphHeightScaled = maxGlyphHeight * scale;
+
+            totalWidth = Math.max(chordWidth + glyphHeightScaled + padding * 2, 200);
+            totalHeight = Math.max(arcRadius * 2 + glyphHeightScaled + padding * 2, 200);
+        } else {
+            const layout = getTextLayout(text, scale);
+            totalWidth = Math.max(layout.totalWidth + padding * 2, 100);
+            totalHeight = Math.max(layout.totalHeight + padding * 2 + maxEffectOffset * 2, 50);
+        }
 
         previewCanvas.width = totalWidth;
         previewCanvas.height = totalHeight;
 
         previewCtx.save();
-        previewCtx.translate(padding, padding + maxEffectOffset);
+        if (!arcEnabled) {
+            previewCtx.translate(padding, padding + maxEffectOffset);
+        }
 
         renderFrame(previewCtx, previewState.currentFrame, text, scale, totalWidth, totalHeight);
 
@@ -2787,13 +2994,63 @@ const PixelFontEditor = (function() {
         const text = document.getElementById('preview-text').value;
         const scale = previewState.scale;
         const fps = previewState.fps;
+        const arcEnabled = previewState.arcEnabled;
         const font = getCurrentFont();
 
-        const layout = getTextLayout(text, scale);
+        let totalWidth, totalHeight;
         const padding = 20;
         const maxEffectOffset = 20;
-        const totalWidth = Math.max(layout.totalWidth + padding * 2, 100);
-        const totalHeight = Math.max(layout.totalHeight + padding * 2 + maxEffectOffset * 2, 50);
+
+        if (arcEnabled) {
+            const arcRadius = previewState.arcRadius * scale;
+            const segments = parseFontTags(text);
+            let totalArcLength = 0;
+            let maxGlyphHeight = 0;
+
+            segments.forEach(segment => {
+                const segFont = getFontByName(segment.fontName);
+                if (!segFont) return;
+                if (segFont.metadata.glyphHeight > maxGlyphHeight) {
+                    maxGlyphHeight = segFont.metadata.glyphHeight;
+                }
+
+                const processed = processTextWithFont(segment.text, segFont);
+                const defaultSpacing = segFont.metadata.defaultSpacing * scale;
+                const letterSpacing = previewState.letterSpacing * scale;
+
+                for (let i = 0; i < processed.length; i++) {
+                    const item = processed[i];
+                    let glyph;
+
+                    if (item.type === 'ligature') {
+                        glyph = item.glyph;
+                    } else {
+                        glyph = item.glyph || createEmptyGlyph(segFont.metadata.glyphWidth, segFont.metadata.glyphHeight);
+                    }
+
+                    let kerningOffset = 0;
+                    if (i > 0 && processed[i-1].type === 'char') {
+                        const prevChar = processed[i-1].char;
+                        const kerningKey = prevChar + item.char;
+                        kerningOffset = (segFont.kerning[kerningKey] || 0) * scale;
+                    }
+
+                    const charWidth = glyph.width * scale + defaultSpacing + kerningOffset + letterSpacing;
+                    totalArcLength += charWidth;
+                }
+            });
+
+            const arcAngle = totalArcLength / arcRadius;
+            const chordWidth = 2 * arcRadius * Math.sin(arcAngle / 2);
+            const glyphHeightScaled = maxGlyphHeight * scale;
+
+            totalWidth = Math.max(chordWidth + glyphHeightScaled + padding * 2, 200);
+            totalHeight = Math.max(arcRadius * 2 + glyphHeightScaled + padding * 2, 200);
+        } else {
+            const layout = getTextLayout(text, scale);
+            totalWidth = Math.max(layout.totalWidth + padding * 2, 100);
+            totalHeight = Math.max(layout.totalHeight + padding * 2 + maxEffectOffset * 2, 50);
+        }
 
         const totalFrames = 60;
 
@@ -2813,10 +3070,14 @@ const PixelFontEditor = (function() {
             offCtx.fillStyle = '#0f0f23';
             offCtx.fillRect(0, 0, totalWidth, totalHeight);
 
-            offCtx.save();
-            offCtx.translate(padding, padding + maxEffectOffset);
+            if (!arcEnabled) {
+                offCtx.save();
+                offCtx.translate(padding, padding + maxEffectOffset);
+            }
             renderFrame(offCtx, frame, text, scale, totalWidth, totalHeight);
-            offCtx.restore();
+            if (!arcEnabled) {
+                offCtx.restore();
+            }
 
             const imageData = offCtx.getImageData(0, 0, totalWidth, totalHeight);
             encoder.addFrame(imageData, delay);
@@ -5530,6 +5791,52 @@ const PixelFontEditor = (function() {
         };
         document.getElementById('gradient-color2').oninput = (e) => {
             previewState.gradientColor2 = e.target.value;
+            renderPreview();
+        };
+
+        document.getElementById('align-left').onclick = () => {
+            previewState.textAlign = 'left';
+            document.getElementById('align-left').classList.add('active');
+            document.getElementById('align-center').classList.remove('active');
+            document.getElementById('align-right').classList.remove('active');
+            renderPreview();
+        };
+        document.getElementById('align-center').onclick = () => {
+            previewState.textAlign = 'center';
+            document.getElementById('align-left').classList.remove('active');
+            document.getElementById('align-center').classList.add('active');
+            document.getElementById('align-right').classList.remove('active');
+            renderPreview();
+        };
+        document.getElementById('align-right').onclick = () => {
+            previewState.textAlign = 'right';
+            document.getElementById('align-left').classList.remove('active');
+            document.getElementById('align-center').classList.remove('active');
+            document.getElementById('align-right').classList.add('active');
+            renderPreview();
+        };
+
+        document.getElementById('letter-spacing').oninput = (e) => {
+            previewState.letterSpacing = parseInt(e.target.value);
+            document.getElementById('letter-spacing-value').textContent = e.target.value;
+            renderPreview();
+        };
+
+        document.getElementById('arc-enabled').onchange = (e) => {
+            previewState.arcEnabled = e.target.checked;
+            document.getElementById('arc-controls').style.display = e.target.checked ? 'flex' : 'none';
+            const alignBtns = document.querySelectorAll('.align-btn');
+            alignBtns.forEach(btn => {
+                btn.disabled = e.target.checked;
+                btn.style.opacity = e.target.checked ? '0.5' : '1';
+                btn.style.cursor = e.target.checked ? 'not-allowed' : 'pointer';
+            });
+            renderPreview();
+        };
+
+        document.getElementById('arc-radius').oninput = (e) => {
+            previewState.arcRadius = parseInt(e.target.value);
+            document.getElementById('arc-radius-value').textContent = e.target.value;
             renderPreview();
         };
         

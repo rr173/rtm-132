@@ -179,6 +179,31 @@
                     <label>速度:</label>
                     <input type="range" id="gradient-speed" min="0.5" max="5" step="0.5" value="1" class="slider">
                 </div>
+                <div class="control-group">
+                    <label>对齐:</label>
+                    <div class="align-buttons">
+                        <button id="align-left" class="align-btn active" title="左对齐">⬅</button>
+                        <button id="align-center" class="align-btn" title="居中对齐">⬌</button>
+                        <button id="align-right" class="align-btn" title="右对齐">➡</button>
+                    </div>
+                </div>
+                <div class="control-group">
+                    <label>字间距:</label>
+                    <input type="range" id="letter-spacing" min="-2" max="4" step="1" value="0" class="slider">
+                    <span id="letter-spacing-value" class="slider-value">0</span>
+                </div>
+                <div class="control-group">
+                    <label>弧形:</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="arc-enabled">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="control-group effect-controls" id="arc-controls" style="display: none;">
+                    <label>半径:</label>
+                    <input type="range" id="arc-radius" min="30" max="200" step="1" value="80" class="slider">
+                    <span id="arc-radius-value" class="slider-value">80</span>
+                </div>
             </div>
             <div class="preview-canvas-container">
                 <canvas id="preview-canvas"></canvas>
