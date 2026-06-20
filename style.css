@@ -1815,3 +1815,144 @@ textarea.form-input {
 .canvas-container.playback-mode #glyph-canvas {
     cursor: not-allowed;
 }
+
+.component-library {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 92px);
+    gap: 6px;
+    align-content: start;
+    border-top: 1px solid var(--border);
+}
+
+.component-item {
+    background-color: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative;
+}
+
+.component-item:hover {
+    border-color: var(--accent);
+    transform: scale(1.03);
+}
+
+.component-item.active {
+    border-color: var(--accent);
+    background-color: rgba(99, 102, 241, 0.15);
+}
+
+.component-thumbnail {
+    image-rendering: pixelated;
+    margin-bottom: 4px;
+    background-color: var(--bg-tertiary);
+    border-radius: 2px;
+    padding: 2px;
+}
+
+.component-name {
+    font-size: 10px;
+    color: var(--text-primary);
+    text-align: center;
+    word-break: break-all;
+    max-width: 80px;
+    font-family: monospace;
+}
+
+.component-size-label {
+    font-size: 8px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.component-actions {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    display: none;
+    gap: 2px;
+}
+
+.component-item:hover .component-actions {
+    display: flex;
+}
+
+.component-action-btn {
+    width: 16px;
+    height: 16px;
+    background-color: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+
+.component-action-btn:hover {
+    background-color: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+
+.component-action-btn.delete:hover {
+    background-color: var(--danger);
+    border-color: var(--danger);
+}
+
+.component-empty {
+    text-align: center;
+    padding: 20px;
+    color: var(--text-muted);
+    font-size: 11px;
+    grid-column: 1 / -1;
+}
+
+.component-edit-canvas-container {
+    display: flex;
+    justify-content: center;
+    padding: 20px;
+    background-color: var(--bg-tertiary);
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    margin-top: 12px;
+}
+
+#component-edit-canvas {
+    image-rendering: pixelated;
+    cursor: crosshair;
+}
+
+.component-tooltip {
+    position: fixed;
+    background-color: var(--bg-panel);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 11px;
+    color: var(--text-primary);
+    z-index: 3000;
+    pointer-events: none;
+    font-family: monospace;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    white-space: nowrap;
+}
+
+.pixel-component-bg {
+    background-color: rgba(99, 102, 241, 0.25) !important;
+}
+
+.selection-rect {
+    pointer-events: none;
+}

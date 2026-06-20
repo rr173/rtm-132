@@ -43,6 +43,13 @@
                         <button id="btn-record" class="tool-btn record-btn" title="录制教程">●</button>
                     </div>
                     <div class="tool-group">
+                        <button id="btn-tool-pencil" class="tool-btn active" title="铅笔">✏</button>
+                        <button id="btn-tool-eraser" class="tool-btn" title="橡皮">⌫</button>
+                        <button id="btn-tool-line" class="tool-btn" title="直线">／</button>
+                        <button id="btn-tool-rect" class="tool-btn" title="矩形">▢</button>
+                        <button id="btn-tool-select" class="tool-btn" title="框选（保存组件）">⊞</button>
+                    </div>
+                    <div class="tool-group">
                         <button id="btn-clear-glyph" class="tool-btn" title="清空">🗑</button>
                         <button id="btn-copy-glyph" class="tool-btn" title="复制">⎘</button>
                         <button id="btn-paste-glyph" class="tool-btn" title="粘贴">⎙</button>
@@ -96,6 +103,14 @@
                     </div>
                 </div>
                 <div class="charset-grid" id="glyph-set"></div>
+
+                <div class="panel-header">
+                    <h2>组件库</h2>
+                    <div class="charset-controls">
+                        <button id="btn-save-component" class="small-btn" title="从框选区域保存为组件">保存</button>
+                    </div>
+                </div>
+                <div class="component-library" id="component-library"></div>
             </aside>
         </main>
 
@@ -351,6 +366,53 @@
             </div>
         </div>
     </div>
+
+    <div class="modal-overlay" id="component-editor-modal">
+        <div class="modal-content wide">
+            <div class="modal-header">
+                <h2 id="component-editor-title">编辑组件</h2>
+                <button class="modal-close" data-modal="component-editor-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>组件名称</label>
+                        <input type="text" id="component-name-input" class="form-input" placeholder="输入组件名称">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>宽度</label>
+                        <input type="number" id="component-width-input" class="form-input" min="1" max="32" value="5">
+                    </div>
+                    <div class="form-group">
+                        <label>高度</label>
+                        <input type="number" id="component-height-input" class="form-input" min="1" max="32" value="5">
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: flex-end;">
+                        <button id="btn-apply-component-size" class="small-btn">应用尺寸</button>
+                    </div>
+                </div>
+                <div class="component-edit-canvas-container">
+                    <canvas id="component-edit-canvas"></canvas>
+                </div>
+                <div class="form-row" style="margin-top: 12px; justify-content: center; gap: 12px;">
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label style="display: inline; margin-right: 8px;">当前工具:</label>
+                        <button id="btn-component-tool-pencil" class="tool-btn active">✏ 铅笔</button>
+                        <button id="btn-component-tool-eraser" class="tool-btn">⌫ 橡皮</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn secondary" data-modal-cancel="component-editor-modal">取消</button>
+                <button class="modal-btn primary" id="btn-save-component-edit">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="component-tooltip" class="component-tooltip" style="display: none;"></div>
+    <div id="component-context-menu" class="context-menu"></div>
 
     <script src="app.js"></script>
 </body>

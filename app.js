@@ -52,7 +52,14 @@ const PixelFontEditor = (function() {
         playbackTimerId: null,
         playbackHighlightPixels: [],
         playbackHighlightAll: false,
-        playbackHighlightTimerId: null
+        playbackHighlightTimerId: null,
+        selectionStart: null,
+        selectionEnd: null,
+        selectedComponent: null,
+        componentEditorContext: null,
+        componentEditorTool: 'pencil',
+        componentEditorIsDrawing: false,
+        hoveredComponentRef: null
     };
 
     let previewState = {
@@ -112,7 +119,8 @@ const PixelFontEditor = (function() {
             },
             glyphs: {},
             kerning: {},
-            ligatures: {}
+            ligatures: {},
+            components: {}
         };
     }
 
@@ -121,7 +129,8 @@ const PixelFontEditor = (function() {
             metadata: { ...fontData.metadata },
             glyphs: {},
             kerning: { ...fontData.kerning },
-            ligatures: {}
+            ligatures: {},
+            components: {}
         };
         Object.keys(fontData.glyphs).forEach(cp => {
             const g = fontData.glyphs[cp];
@@ -129,7 +138,8 @@ const PixelFontEditor = (function() {
                 width: g.width,
                 height: g.height,
                 pixels: [...g.pixels],
-                modified: g.modified
+                modified: g.modified,
+                componentRefs: g.componentRefs ? JSON.parse(JSON.stringify(g.componentRefs)) : []
             };
         });
         Object.keys(fontData.ligatures).forEach(key => {
@@ -138,7 +148,16 @@ const PixelFontEditor = (function() {
                 width: l.width,
                 height: l.height,
                 pixels: [...l.pixels],
-                modified: l.modified
+                modified: l.modified,
+                componentRefs: l.componentRefs ? JSON.parse(JSON.stringify(l.componentRefs)) : []
+            };
+        });
+        Object.keys(fontData.components || {}).forEach(name => {
+            const c = fontData.components[name];
+            newFont.components[name] = {
+                width: c.width,
+                height: c.height,
+                pixels: [...c.pixels]
             };
         });
         return newFont;
@@ -236,7 +255,8 @@ const PixelFontEditor = (function() {
             width: width,
             height: height,
             pixels: rows,
-            modified: false
+            modified: false,
+            componentRefs: []
         };
     }
 
@@ -245,7 +265,8 @@ const PixelFontEditor = (function() {
             width: glyph.width,
             height: glyph.height,
             pixels: [...glyph.pixels],
-            modified: glyph.modified
+            modified: glyph.modified,
+            componentRefs: glyph.componentRefs ? JSON.parse(JSON.stringify(glyph.componentRefs)) : []
         };
     }
 
@@ -392,6 +413,31 @@ const PixelFontEditor = (function() {
         pushHistorySnapshot();
     }
 
+    function getComponentMaskForGlyph(glyph) {
+        const font = getCurrentFont();
+        const mask = [];
+        for (let y = 0; y < glyph.height; y++) {
+            mask.push(new Array(glyph.width).fill(null));
+        }
+        if (!glyph.componentRefs) return mask;
+        glyph.componentRefs.forEach((ref, refIdx) => {
+            const comp = font.components?.[ref.componentName];
+            if (!comp) return;
+            for (let cy = 0; cy < comp.height; cy++) {
+                for (let cx = 0; cx < comp.width; cx++) {
+                    if (getPixel(comp, cx, cy)) {
+                        const gx = ref.x + cx;
+                        const gy = ref.y + cy;
+                        if (gx >= 0 && gx < glyph.width && gy >= 0 && gy < glyph.height) {
+                            mask[gy][gx] = refIdx;
+                        }
+                    }
+                }
+            }
+        });
+        return mask;
+    }
+
     function renderGlyphCanvas() {
         const font = getCurrentFont();
         const glyph = getCurrentGlyph();
@@ -405,14 +451,22 @@ const PixelFontEditor = (function() {
         
         ctx.fillStyle = '#1a1a2e';
         ctx.fillRect(0, 0, width, height);
-        
+
+        const componentMask = getComponentMaskForGlyph(glyph);
+
         for (let y = 0; y < glyph.height; y++) {
             for (let x = 0; x < glyph.width; x++) {
                 const px = x * PIXEL_SIZE;
                 const py = y * PIXEL_SIZE;
                 
+                const refIdx = componentMask[y][x];
+                if (refIdx !== null) {
+                    ctx.fillStyle = 'rgba(99, 102, 241, 0.25)';
+                    ctx.fillRect(px, py, PIXEL_SIZE, PIXEL_SIZE);
+                }
+                
                 if (getPixel(glyph, x, y)) {
-                    ctx.fillStyle = '#ffffff';
+                    ctx.fillStyle = refIdx !== null ? '#a5b4fc' : '#ffffff';
                     ctx.fillRect(px, py, PIXEL_SIZE, PIXEL_SIZE);
                 }
                 
@@ -446,7 +500,7 @@ const PixelFontEditor = (function() {
         ctx.lineTo(width, descentY + 0.5);
         ctx.stroke();
         
-        if (state.lineStart && state.currentTool === 'line') {
+        if (state.lineStart && (state.currentTool === 'line' || state.currentTool === 'rect')) {
             ctx.strokeStyle = 'rgba(99, 102, 241, 0.8)';
             ctx.lineWidth = 2;
             ctx.setLineDash([5, 5]);
@@ -461,6 +515,67 @@ const PixelFontEditor = (function() {
             );
             ctx.stroke();
             ctx.setLineDash([]);
+        }
+
+        if (state.currentTool === 'select' && state.selectionStart) {
+            const sx = Math.min(state.selectionStart.x, state.lastMouseX);
+            const ex = Math.max(state.selectionStart.x, state.lastMouseX);
+            const sy = Math.min(state.selectionStart.y, state.lastMouseY);
+            const ey = Math.max(state.selectionStart.y, state.lastMouseY);
+            ctx.strokeStyle = 'rgba(34, 197, 94, 0.9)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 4]);
+            ctx.strokeRect(
+                sx * PIXEL_SIZE + 1,
+                sy * PIXEL_SIZE + 1,
+                (ex - sx + 1) * PIXEL_SIZE - 2,
+                (ey - sy + 1) * PIXEL_SIZE - 2
+            );
+            ctx.setLineDash([]);
+            ctx.fillStyle = 'rgba(34, 197, 94, 0.1)';
+            ctx.fillRect(
+                sx * PIXEL_SIZE + 1,
+                sy * PIXEL_SIZE + 1,
+                (ex - sx + 1) * PIXEL_SIZE - 2,
+                (ey - sy + 1) * PIXEL_SIZE - 2
+            );
+        }
+
+        if (state.selectedComponent && state.currentTool === 'place-component') {
+            const comp = font.components?.[state.selectedComponent];
+            if (comp) {
+                const px = state.lastMouseX;
+                const py = state.lastMouseY;
+                ctx.globalAlpha = 0.5;
+                for (let cy = 0; cy < comp.height; cy++) {
+                    for (let cx = 0; cx < comp.width; cx++) {
+                        if (getPixel(comp, cx, cy)) {
+                            const gx = px + cx;
+                            const gy = py + cy;
+                            if (gx >= 0 && gx < glyph.width && gy >= 0 && gy < glyph.height) {
+                                ctx.fillStyle = '#22c55e';
+                                ctx.fillRect(
+                                    gx * PIXEL_SIZE,
+                                    gy * PIXEL_SIZE,
+                                    PIXEL_SIZE,
+                                    PIXEL_SIZE
+                                );
+                            }
+                        }
+                    }
+                }
+                ctx.globalAlpha = 1;
+                ctx.strokeStyle = 'rgba(34, 197, 94, 0.9)';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([3, 3]);
+                ctx.strokeRect(
+                    px * PIXEL_SIZE + 0.5,
+                    py * PIXEL_SIZE + 0.5,
+                    comp.width * PIXEL_SIZE - 1,
+                    comp.height * PIXEL_SIZE - 1
+                );
+                ctx.setLineDash([]);
+            }
         }
     }
 
@@ -492,12 +607,195 @@ const PixelFontEditor = (function() {
         }
     }
 
+    function orPixelsIntoGlyph(glyph, srcPixels, srcWidth, srcHeight, offsetX, offsetY) {
+        for (let sy = 0; sy < srcHeight; sy++) {
+            for (let sx = 0; sx < srcWidth; sx++) {
+                if (srcPixels[sy][sx] === '1') {
+                    const gx = offsetX + sx;
+                    const gy = offsetY + sy;
+                    if (gx >= 0 && gx < glyph.width && gy >= 0 && gy < glyph.height) {
+                        if (getPixel(glyph, gx, gy) !== 1) {
+                            setPixel(glyph, gx, gy, 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    function computeComponentContributionPixels(glyph, excludeRefIndex) {
+        const font = getCurrentFont();
+        const contrib = [];
+        for (let y = 0; y < glyph.height; y++) {
+            contrib.push(new Array(glyph.width).fill(false));
+        }
+        if (!glyph.componentRefs) return contrib;
+        glyph.componentRefs.forEach((ref, idx) => {
+            if (excludeRefIndex !== undefined && idx === excludeRefIndex) return;
+            const comp = font.components?.[ref.componentName];
+            if (!comp) return;
+            for (let cy = 0; cy < comp.height; cy++) {
+                for (let cx = 0; cx < comp.width; cx++) {
+                    if (getPixel(comp, cx, cy)) {
+                        const gx = ref.x + cx;
+                        const gy = ref.y + cy;
+                        if (gx >= 0 && gx < glyph.width && gy >= 0 && gy < glyph.height) {
+                            contrib[gy][gx] = true;
+                        }
+                    }
+                }
+            }
+        });
+        return contrib;
+    }
+
+    function clearComponentContribution(glyph) {
+        const contrib = computeComponentContributionPixels(glyph);
+        for (let y = 0; y < glyph.height; y++) {
+            for (let x = 0; x < glyph.width; x++) {
+                if (contrib[y][x]) {
+                    setPixel(glyph, x, y, 0);
+                }
+            }
+        }
+    }
+
+    function rebuildGlyphFromComponents(glyph) {
+        clearComponentContribution(glyph);
+        const font = getCurrentFont();
+        if (!glyph.componentRefs) return;
+        glyph.componentRefs.forEach(ref => {
+            const comp = font.components?.[ref.componentName];
+            if (!comp) return;
+            orPixelsIntoGlyph(glyph, comp.pixels, comp.width, comp.height, ref.x, ref.y);
+        });
+    }
+
+    function cascadeUpdateComponent(componentName) {
+        const font = getCurrentFont();
+        Object.keys(font.glyphs).forEach(cp => {
+            const glyph = font.glyphs[cp];
+            if (!glyph.componentRefs) return;
+            const hasRef = glyph.componentRefs.some(r => r.componentName === componentName);
+            if (hasRef) {
+                rebuildGlyphFromComponents(glyph);
+            }
+        });
+        Object.keys(font.ligatures).forEach(key => {
+            const glyph = font.ligatures[key];
+            if (!glyph.componentRefs) return;
+            const hasRef = glyph.componentRefs.some(r => r.componentName === componentName);
+            if (hasRef) {
+                rebuildGlyphFromComponents(glyph);
+            }
+        });
+    }
+
+    function placeComponentAt(componentName, offsetX, offsetY) {
+        const font = getCurrentFont();
+        const comp = font.components?.[componentName];
+        if (!comp) return false;
+        const glyph = getCurrentGlyph();
+        if (!glyph) return false;
+        if (!glyph.componentRefs) glyph.componentRefs = [];
+        glyph.componentRefs.push({
+            componentName: componentName,
+            x: offsetX,
+            y: offsetY
+        });
+        orPixelsIntoGlyph(glyph, comp.pixels, comp.width, comp.height, offsetX, offsetY);
+        return true;
+    }
+
+    function unlinkComponentRef(refIndex) {
+        const glyph = getCurrentGlyph();
+        if (!glyph || !glyph.componentRefs || refIndex < 0 || refIndex >= glyph.componentRefs.length) return;
+        glyph.componentRefs.splice(refIndex, 1);
+        saveHistory();
+        renderAll();
+    }
+
+    function createComponentFromSelection() {
+        if (!state.selectionStart || !state.selectionEnd) {
+            alert('请先用框选工具选择一个区域');
+            return;
+        }
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
+        const sx = Math.min(state.selectionStart.x, state.selectionEnd.x);
+        const ex = Math.max(state.selectionStart.x, state.selectionEnd.x);
+        const sy = Math.min(state.selectionStart.y, state.selectionEnd.y);
+        const ey = Math.max(state.selectionStart.y, state.selectionEnd.y);
+        const w = ex - sx + 1;
+        const h = ey - sy + 1;
+        if (w < 1 || h < 1) {
+            alert('选区无效');
+            return;
+        }
+        let hasPixel = false;
+        const pixels = [];
+        for (let y = sy; y <= ey; y++) {
+            let row = '';
+            for (let x = sx; x <= ex; x++) {
+                const v = getPixel(glyph, x, y);
+                if (v) hasPixel = true;
+                row += v ? '1' : '0';
+            }
+            pixels.push(row);
+        }
+        if (!hasPixel) {
+            if (!confirm('选区中没有像素，确定要保存空组件吗？')) return;
+        }
+        const name = prompt('请输入组件名称：', 'comp_' + (Object.keys(getCurrentFont().components || {}).length + 1));
+        if (!name || !name.trim()) return;
+        const trimmed = name.trim();
+        const font = getCurrentFont();
+        if (!font.components) font.components = {};
+        if (font.components[trimmed]) {
+            if (!confirm(`组件 "${trimmed}" 已存在，是否覆盖？`)) return;
+        }
+        font.components[trimmed] = {
+            width: w,
+            height: h,
+            pixels: pixels
+        };
+        renderComponentLibrary();
+        alert(`组件 "${trimmed}" 已保存 (${w}×${h})`);
+    }
+
     function handleCanvasMouseDown(e) {
         if (state.playbackMode) return;
+        if (e.button === 2) {
+            e.preventDefault();
+            const { x, y } = getCanvasPixelCoords(e, canvas);
+            showComponentContextMenu(e.clientX, e.clientY, x, y);
+            return;
+        }
 
         const { x, y } = getCanvasPixelCoords(e, canvas);
         const glyph = getCurrentGlyph();
         if (!glyph) return;
+
+        if (state.currentTool === 'select') {
+            state.selectionStart = { x, y };
+            state.selectionEnd = { x, y };
+            state.isDrawing = true;
+            state.lastMouseX = x;
+            state.lastMouseY = y;
+            renderGlyphCanvas();
+            return;
+        }
+
+        if (state.currentTool === 'place-component' && state.selectedComponent) {
+            saveHistory();
+            placeComponentAt(state.selectedComponent, x, y);
+            state.drawingModified = true;
+            renderEditor();
+            renderGlyphSet();
+            renderPreview();
+            saveHistory();
+            return;
+        }
         
         state.isDrawing = true;
         state.lastMouseX = x;
@@ -513,6 +811,7 @@ const PixelFontEditor = (function() {
         }
         
         if (state.currentTool === 'line' && state.lineStart) {
+            saveHistory();
             bresenhamLine(state.lineStart.x, state.lineStart.y, x, y, (lx, ly) => {
                 setPixel(glyph, lx, ly, 1);
             });
@@ -525,9 +824,9 @@ const PixelFontEditor = (function() {
                 });
             }
             state.lineStart = null;
-            saveHistory();
             state.drawingModified = false;
         } else if (state.currentTool === 'rect' && state.lineStart) {
+            saveHistory();
             const sx = Math.min(state.lineStart.x, x);
             const ex = Math.max(state.lineStart.x, x);
             const sy = Math.min(state.lineStart.y, y);
@@ -546,9 +845,11 @@ const PixelFontEditor = (function() {
                 });
             }
             state.lineStart = null;
-            saveHistory();
             state.drawingModified = false;
         } else {
+            if (state.currentTool === 'pencil') {
+                saveHistory();
+            }
             applyTool(x, y, glyph, canvas);
             if (state.isRecording) {
                 if (state.currentTool === 'pencil') {
@@ -571,11 +872,19 @@ const PixelFontEditor = (function() {
         const { x, y } = getCanvasPixelCoords(e, canvas);
         state.lastMouseX = x;
         state.lastMouseY = y;
-        
+
+        showComponentTooltip(e.clientX, e.clientY, x, y);
+
         if (!state.isDrawing) {
-            if (state.lineStart) {
+            if (state.lineStart || state.selectedComponent || state.currentTool === 'select') {
                 renderGlyphCanvas();
             }
+            return;
+        }
+
+        if (state.currentTool === 'select') {
+            state.selectionEnd = { x, y };
+            renderGlyphCanvas();
             return;
         }
         
@@ -601,11 +910,74 @@ const PixelFontEditor = (function() {
     }
 
     function handleCanvasMouseUp() {
+        if (state.currentTool === 'select' && state.selectionStart && state.isDrawing) {
+            state.selectionEnd = { x: state.lastMouseX, y: state.lastMouseY };
+            renderGlyphCanvas();
+        }
         if (state.isDrawing && state.drawingModified) {
             saveHistory();
         }
         state.isDrawing = false;
         state.drawingModified = false;
+    }
+
+    function showComponentTooltip(clientX, clientY, gx, gy) {
+        const tooltip = document.getElementById('component-tooltip');
+        if (!tooltip) return;
+        const glyph = getCurrentGlyph();
+        if (!glyph || !glyph.componentRefs || glyph.componentRefs.length === 0) {
+            tooltip.style.display = 'none';
+            state.hoveredComponentRef = null;
+            return;
+        }
+        const mask = getComponentMaskForGlyph(glyph);
+        if (gy < 0 || gy >= mask.length || gx < 0 || gx >= mask[0].length) {
+            tooltip.style.display = 'none';
+            state.hoveredComponentRef = null;
+            return;
+        }
+        const refIdx = mask[gy][gx];
+        if (refIdx === null || refIdx === undefined) {
+            tooltip.style.display = 'none';
+            state.hoveredComponentRef = null;
+            return;
+        }
+        const ref = glyph.componentRefs[refIdx];
+        state.hoveredComponentRef = refIdx;
+        tooltip.textContent = `组件: ${ref.componentName} @(${ref.x},${ref.y})`;
+        tooltip.style.display = 'block';
+        tooltip.style.left = (clientX + 12) + 'px';
+        tooltip.style.top = (clientY + 12) + 'px';
+    }
+
+    function hideComponentTooltip() {
+        const tooltip = document.getElementById('component-tooltip');
+        if (tooltip) {
+            tooltip.style.display = 'none';
+        }
+        state.hoveredComponentRef = null;
+    }
+
+    function showComponentContextMenu(clientX, clientY, gx, gy) {
+        const glyph = getCurrentGlyph();
+        const menu = document.getElementById('component-context-menu');
+        if (!glyph || !menu) return;
+        const mask = getComponentMaskForGlyph(glyph);
+        let refIdx = null;
+        if (gy >= 0 && gy < mask.length && gx >= 0 && gx < mask[0].length) {
+            refIdx = mask[gy][gx];
+        }
+        const items = [];
+        if (refIdx !== null && refIdx !== undefined) {
+            const ref = glyph.componentRefs[refIdx];
+            items.push({
+                icon: '🔗',
+                label: `解除引用: ${ref.componentName}`,
+                action: () => unlinkComponentRef(refIdx)
+            });
+        }
+        if (items.length === 0) return;
+        showContextMenu(clientX, clientY, items, 'component-context-menu');
     }
 
     function flipHorizontal() {
@@ -1185,6 +1557,358 @@ const PixelFontEditor = (function() {
         renderKerningList();
         renderLigatureList();
         updateSettingsForm();
+        renderComponentLibrary();
+    }
+
+    function drawComponentThumbnail(canvasEl, component) {
+        const ctx2d = canvasEl.getContext('2d');
+        const scale = Math.max(1, Math.min(4, Math.floor(72 / Math.max(component.width, component.height))));
+        const width = component.width * scale;
+        const height = component.height * scale;
+        canvasEl.width = width;
+        canvasEl.height = height;
+        ctx2d.fillStyle = '#0f0f23';
+        ctx2d.fillRect(0, 0, width, height);
+        for (let y = 0; y < component.height; y++) {
+            for (let x = 0; x < component.width; x++) {
+                if (component.pixels[y][x] === '1') {
+                    ctx2d.fillStyle = '#a5b4fc';
+                    ctx2d.fillRect(x * scale, y * scale, scale, scale);
+                }
+            }
+        }
+    }
+
+    function renderComponentLibrary() {
+        const container = document.getElementById('component-library');
+        if (!container) return;
+        container.innerHTML = '';
+        const font = getCurrentFont();
+        if (!font.components || Object.keys(font.components).length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'component-empty';
+            empty.textContent = '暂无组件。用框选工具选择区域后点击"保存"创建。';
+            container.appendChild(empty);
+            return;
+        }
+        Object.keys(font.components).sort().forEach(name => {
+            const comp = font.components[name];
+            const item = document.createElement('div');
+            item.className = 'component-item';
+            if (state.selectedComponent === name && state.currentTool === 'place-component') {
+                item.classList.add('active');
+            }
+            item.title = `双击编辑: ${name} (${comp.width}×${comp.height})`;
+
+            const actions = document.createElement('div');
+            actions.className = 'component-actions';
+            const renameBtn = document.createElement('button');
+            renameBtn.className = 'component-action-btn';
+            renameBtn.title = '重命名';
+            renameBtn.textContent = '✎';
+            renameBtn.onclick = (e) => {
+                e.stopPropagation();
+                renameComponent(name);
+            };
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'component-action-btn delete';
+            deleteBtn.title = '删除';
+            deleteBtn.textContent = '✕';
+            deleteBtn.onclick = (e) => {
+                e.stopPropagation();
+                deleteComponent(name);
+            };
+            actions.appendChild(renameBtn);
+            actions.appendChild(deleteBtn);
+            item.appendChild(actions);
+
+            const thumb = document.createElement('canvas');
+            thumb.className = 'component-thumbnail';
+            drawComponentThumbnail(thumb, comp);
+            item.appendChild(thumb);
+
+            const nameLabel = document.createElement('div');
+            nameLabel.className = 'component-name';
+            nameLabel.textContent = name;
+            item.appendChild(nameLabel);
+
+            const sizeLabel = document.createElement('div');
+            sizeLabel.className = 'component-size-label';
+            sizeLabel.textContent = `${comp.width}×${comp.height}`;
+            item.appendChild(sizeLabel);
+
+            item.onclick = () => {
+                state.selectedComponent = name;
+                state.currentTool = 'place-component';
+                updateToolButtons();
+                renderComponentLibrary();
+                renderGlyphCanvas();
+            };
+            item.ondblclick = () => {
+                openComponentEditor(name);
+            };
+            item.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const items = [
+                    { icon: '✎', label: '重命名', action: () => renameComponent(name) },
+                    { icon: '📝', label: '编辑组件', action: () => openComponentEditor(name) },
+                    { divider: true },
+                    { icon: '✕', label: '删除', danger: true, action: () => deleteComponent(name) }
+                ];
+                showContextMenu(e.clientX, e.clientY, items);
+            };
+
+            container.appendChild(item);
+        });
+    }
+
+    function renameComponent(oldName) {
+        const font = getCurrentFont();
+        if (!font.components || !font.components[oldName]) return;
+        const newName = prompt('请输入新的组件名称：', oldName);
+        if (!newName || !newName.trim()) return;
+        const trimmed = newName.trim();
+        if (trimmed === oldName) return;
+        if (font.components[trimmed]) {
+            alert(`组件 "${trimmed}" 已存在！`);
+            return;
+        }
+        font.components[trimmed] = font.components[oldName];
+        delete font.components[oldName];
+        Object.keys(font.glyphs).forEach(cp => {
+            const g = font.glyphs[cp];
+            if (g.componentRefs) {
+                g.componentRefs.forEach(r => {
+                    if (r.componentName === oldName) r.componentName = trimmed;
+                });
+            }
+        });
+        Object.keys(font.ligatures).forEach(key => {
+            const g = font.ligatures[key];
+            if (g.componentRefs) {
+                g.componentRefs.forEach(r => {
+                    if (r.componentName === oldName) r.componentName = trimmed;
+                });
+            }
+        });
+        if (state.selectedComponent === oldName) {
+            state.selectedComponent = trimmed;
+        }
+        renderAll();
+    }
+
+    function deleteComponent(name) {
+        const font = getCurrentFont();
+        if (!font.components || !font.components[name]) return;
+        let usedCount = 0;
+        Object.keys(font.glyphs).forEach(cp => {
+            const g = font.glyphs[cp];
+            if (g.componentRefs) {
+                usedCount += g.componentRefs.filter(r => r.componentName === name).length;
+            }
+        });
+        Object.keys(font.ligatures).forEach(key => {
+            const g = font.ligatures[key];
+            if (g.componentRefs) {
+                usedCount += g.componentRefs.filter(r => r.componentName === name).length;
+            }
+        });
+        let msg = `确定要删除组件 "${name}" 吗？`;
+        if (usedCount > 0) {
+            msg += `\n该组件被引用 ${usedCount} 次，删除后相关引用将保留当前像素效果（固化）。`;
+        }
+        if (!confirm(msg)) return;
+        Object.keys(font.glyphs).forEach(cp => {
+            const g = font.glyphs[cp];
+            if (g.componentRefs) {
+                g.componentRefs = g.componentRefs.filter(r => r.componentName !== name);
+            }
+        });
+        Object.keys(font.ligatures).forEach(key => {
+            const g = font.ligatures[key];
+            if (g.componentRefs) {
+                g.componentRefs = g.componentRefs.filter(r => r.componentName !== name);
+            }
+        });
+        delete font.components[name];
+        if (state.selectedComponent === name) {
+            state.selectedComponent = null;
+            state.currentTool = 'pencil';
+            updateToolButtons();
+        }
+        renderAll();
+    }
+
+    function openComponentEditor(name) {
+        const font = getCurrentFont();
+        const comp = font.components?.[name];
+        if (!comp) return;
+        state.componentEditorContext = {
+            originalName: name,
+            editingName: name,
+            width: comp.width,
+            height: comp.height,
+            pixels: [...comp.pixels]
+        };
+        state.componentEditorTool = 'pencil';
+        document.getElementById('component-editor-title').textContent = `编辑组件: ${name}`;
+        document.getElementById('component-name-input').value = name;
+        document.getElementById('component-width-input').value = comp.width;
+        document.getElementById('component-height-input').value = comp.height;
+        updateComponentEditorToolButtons();
+        renderComponentEditorCanvas();
+        showModal('component-editor-modal');
+    }
+
+    function renderComponentEditorCanvas() {
+        const canvasEl = document.getElementById('component-edit-canvas');
+        if (!canvasEl || !state.componentEditorContext) return;
+        const c = state.componentEditorContext;
+        const scale = 25;
+        const ctx2 = canvasEl.getContext('2d');
+        canvasEl.width = c.width * scale;
+        canvasEl.height = c.height * scale;
+        ctx2.fillStyle = '#1a1a2e';
+        ctx2.fillRect(0, 0, canvasEl.width, canvasEl.height);
+        for (let y = 0; y < c.height; y++) {
+            for (let x = 0; x < c.width; x++) {
+                const px = x * scale;
+                const py = y * scale;
+                if (c.pixels[y][x] === '1') {
+                    ctx2.fillStyle = '#ffffff';
+                    ctx2.fillRect(px, py, scale, scale);
+                }
+                ctx2.strokeStyle = '#2a2a4a';
+                ctx2.lineWidth = 1;
+                ctx2.strokeRect(px + 0.5, py + 0.5, scale - 1, scale - 1);
+            }
+        }
+    }
+
+    function applyComponentEditorSize() {
+        if (!state.componentEditorContext) return;
+        const c = state.componentEditorContext;
+        const newW = parseInt(document.getElementById('component-width-input').value) || 1;
+        const newH = parseInt(document.getElementById('component-height-input').value) || 1;
+        const w = Math.max(1, Math.min(32, newW));
+        const h = Math.max(1, Math.min(32, newH));
+        const newPixels = [];
+        for (let y = 0; y < h; y++) {
+            let row = '';
+            for (let x = 0; x < w; x++) {
+                if (y < c.height && x < c.width && c.pixels[y][x] === '1') {
+                    row += '1';
+                } else {
+                    row += '0';
+                }
+            }
+            newPixels.push(row);
+        }
+        c.width = w;
+        c.height = h;
+        c.pixels = newPixels;
+        renderComponentEditorCanvas();
+    }
+
+    function updateComponentEditorToolButtons() {
+        const pb = document.getElementById('btn-component-tool-pencil');
+        const eb = document.getElementById('btn-component-tool-eraser');
+        if (pb) pb.classList.toggle('active', state.componentEditorTool === 'pencil');
+        if (eb) eb.classList.toggle('active', state.componentEditorTool === 'eraser');
+    }
+
+    function saveComponentEditor() {
+        if (!state.componentEditorContext) return;
+        const c = state.componentEditorContext;
+        const font = getCurrentFont();
+        const newNameInput = document.getElementById('component-name-input').value.trim();
+        if (!newNameInput) {
+            alert('组件名称不能为空！');
+            return;
+        }
+        if (!font.components) font.components = {};
+
+        const nameChanged = newNameInput !== c.originalName;
+        if (nameChanged && font.components[newNameInput] && newNameInput !== c.originalName) {
+            if (!confirm(`组件 "${newNameInput}" 已存在，是否覆盖？`)) return;
+        }
+
+        const finalName = newNameInput;
+        font.components[finalName] = {
+            width: c.width,
+            height: c.height,
+            pixels: [...c.pixels]
+        };
+        if (nameChanged && c.originalName !== finalName && font.components[c.originalName]) {
+            delete font.components[c.originalName];
+            Object.keys(font.glyphs).forEach(cp => {
+                const g = font.glyphs[cp];
+                if (g.componentRefs) {
+                    g.componentRefs.forEach(r => {
+                        if (r.componentName === c.originalName) r.componentName = finalName;
+                    });
+                }
+            });
+            Object.keys(font.ligatures).forEach(key => {
+                const g = font.ligatures[key];
+                if (g.componentRefs) {
+                    g.componentRefs.forEach(r => {
+                        if (r.componentName === c.originalName) r.componentName = finalName;
+                    });
+                }
+            });
+        }
+
+        cascadeUpdateComponent(finalName);
+
+        state.componentEditorContext = null;
+        hideModal('component-editor-modal');
+        renderAll();
+    }
+
+    function setupComponentEditorEvents() {
+        const canvasEl = document.getElementById('component-edit-canvas');
+        if (!canvasEl) return;
+
+        const getCoords = (e) => {
+            const rect = canvasEl.getBoundingClientRect();
+            const scale = 25;
+            return {
+                x: Math.floor((e.clientX - rect.left) / scale),
+                y: Math.floor((e.clientY - rect.top) / scale)
+            };
+        };
+
+        canvasEl.onmousedown = (e) => {
+            if (!state.componentEditorContext) return;
+            const { x, y } = getCoords(e);
+            state.componentEditorIsDrawing = true;
+            applyComponentEditorPixel(x, y);
+        };
+        canvasEl.onmousemove = (e) => {
+            if (!state.componentEditorContext || !state.componentEditorIsDrawing) return;
+            const { x, y } = getCoords(e);
+            applyComponentEditorPixel(x, y);
+        };
+        canvasEl.onmouseup = () => {
+            state.componentEditorIsDrawing = false;
+        };
+        canvasEl.onmouseleave = () => {
+            state.componentEditorIsDrawing = false;
+        };
+    }
+
+    function applyComponentEditorPixel(x, y) {
+        if (!state.componentEditorContext) return;
+        const c = state.componentEditorContext;
+        if (x < 0 || x >= c.width || y < 0 || y >= c.height) return;
+        const val = state.componentEditorTool === 'pencil' ? '1' : '0';
+        const row = c.pixels[y];
+        if (row[x] !== val) {
+            c.pixels[y] = row.substring(0, x) + val + row.substring(x + 1);
+            renderComponentEditorCanvas();
+        }
     }
 
     function renderEditor() {
@@ -2078,7 +2802,7 @@ const PixelFontEditor = (function() {
 
     function exportJSON() {
         const exportData = {
-            version: 3,
+            version: 4,
             fonts: []
         };
 
@@ -2087,7 +2811,8 @@ const PixelFontEditor = (function() {
                 metadata: { ...font.metadata },
                 glyphs: {},
                 kerning: { ...font.kerning },
-                ligatures: {}
+                ligatures: {},
+                components: {}
             };
             
             Object.keys(font.glyphs).forEach(cp => {
@@ -2097,6 +2822,9 @@ const PixelFontEditor = (function() {
                     height: g.height,
                     pixels: g.pixels
                 };
+                if (g.componentRefs && g.componentRefs.length > 0) {
+                    glyphExport.componentRefs = JSON.parse(JSON.stringify(g.componentRefs));
+                }
                 if (g.tutorial) {
                     glyphExport.tutorial = {
                         initialSnapshot: {
@@ -2112,12 +2840,27 @@ const PixelFontEditor = (function() {
             
             Object.keys(font.ligatures).forEach(key => {
                 const l = font.ligatures[key];
-                fontExport.ligatures[key] = {
+                const ligExport = {
                     width: l.width,
                     height: l.height,
                     pixels: l.pixels
                 };
+                if (l.componentRefs && l.componentRefs.length > 0) {
+                    ligExport.componentRefs = JSON.parse(JSON.stringify(l.componentRefs));
+                }
+                fontExport.ligatures[key] = ligExport;
             });
+
+            if (font.components) {
+                Object.keys(font.components).forEach(name => {
+                    const c = font.components[name];
+                    fontExport.components[name] = {
+                        width: c.width,
+                        height: c.height,
+                        pixels: [...c.pixels]
+                    };
+                });
+            }
 
             exportData.fonts.push(fontExport);
         });
@@ -2144,8 +2887,20 @@ const PixelFontEditor = (function() {
                             metadata: { ...fontData.metadata },
                             glyphs: {},
                             kerning: fontData.kerning || {},
-                            ligatures: {}
+                            ligatures: {},
+                            components: {}
                         };
+                        
+                        if (fontData.components) {
+                            Object.keys(fontData.components).forEach(name => {
+                                const c = fontData.components[name];
+                                font.components[name] = {
+                                    width: c.width,
+                                    height: c.height,
+                                    pixels: [...c.pixels]
+                                };
+                            });
+                        }
                         
                         if (fontData.glyphs) {
                             Object.keys(fontData.glyphs).forEach(cp => {
@@ -2154,7 +2909,8 @@ const PixelFontEditor = (function() {
                                     width: g.width,
                                     height: g.height,
                                     pixels: [...g.pixels],
-                                    modified: false
+                                    modified: false,
+                                    componentRefs: g.componentRefs ? JSON.parse(JSON.stringify(g.componentRefs)) : []
                                 };
                                 if (g.tutorial) {
                                     glyph.tutorial = {
@@ -2177,7 +2933,8 @@ const PixelFontEditor = (function() {
                                     width: l.width,
                                     height: l.height,
                                     pixels: [...l.pixels],
-                                    modified: false
+                                    modified: false,
+                                    componentRefs: l.componentRefs ? JSON.parse(JSON.stringify(l.componentRefs)) : []
                                 };
                             });
                         }
@@ -2190,8 +2947,20 @@ const PixelFontEditor = (function() {
                         metadata: { ...data.metadata },
                         glyphs: {},
                         kerning: data.kerning || {},
-                        ligatures: {}
+                        ligatures: {},
+                        components: {}
                     };
+
+                    if (data.components) {
+                        Object.keys(data.components).forEach(name => {
+                            const c = data.components[name];
+                            font.components[name] = {
+                                width: c.width,
+                                height: c.height,
+                                pixels: [...c.pixels]
+                            };
+                        });
+                    }
                     
                     if (data.glyphs) {
                         Object.keys(data.glyphs).forEach(cp => {
@@ -2200,7 +2969,8 @@ const PixelFontEditor = (function() {
                                 width: g.width,
                                 height: g.height,
                                 pixels: [...g.pixels],
-                                modified: false
+                                modified: false,
+                                componentRefs: g.componentRefs ? JSON.parse(JSON.stringify(g.componentRefs)) : []
                             };
                             if (g.tutorial) {
                                 glyph.tutorial = {
@@ -2223,7 +2993,8 @@ const PixelFontEditor = (function() {
                                 width: l.width,
                                 height: l.height,
                                 pixels: [...l.pixels],
-                                modified: false
+                                modified: false,
+                                componentRefs: l.componentRefs ? JSON.parse(JSON.stringify(l.componentRefs)) : []
                             };
                         });
                     }
@@ -2320,11 +3091,11 @@ const PixelFontEditor = (function() {
         document.getElementById(id).classList.remove('active');
     }
 
-    function showContextMenu(x, y, items) {
+    function showContextMenu(x, y, items, menuId) {
         hideContextMenu();
         
         const menu = document.createElement('div');
-        menu.id = 'context-menu';
+        menu.id = menuId || 'context-menu';
         menu.className = 'context-menu';
         menu.style.left = x + 'px';
         menu.style.top = y + 'px';
@@ -2381,6 +3152,24 @@ const PixelFontEditor = (function() {
     function hideContextMenu() {
         const existing = document.getElementById('context-menu');
         if (existing) existing.remove();
+        const existing2 = document.getElementById('component-context-menu');
+        if (existing2) existing2.remove();
+    }
+
+    function updateToolButtons() {
+        const tools = {
+            'pencil': 'btn-tool-pencil',
+            'eraser': 'btn-tool-eraser',
+            'line': 'btn-tool-line',
+            'rect': 'btn-tool-rect',
+            'select': 'btn-tool-select'
+        };
+        Object.keys(tools).forEach(tool => {
+            const btn = document.getElementById(tools[tool]);
+            if (btn) {
+                btn.classList.toggle('active', state.currentTool === tool);
+            }
+        });
     }
 
     function openSettings(tab) {
@@ -2915,7 +3704,42 @@ const PixelFontEditor = (function() {
             },
             glyphs: {},
             kerning: {},
-            ligatures: {}
+            ligatures: {},
+            components: {}
+        };
+
+        const horizontalPixels = [];
+        for (let y = 0; y < 1; y++) {
+            horizontalPixels.push('11111');
+        }
+        font.components['横'] = {
+            width: 5,
+            height: 1,
+            pixels: horizontalPixels
+        };
+
+        const verticalPixels = [];
+        for (let y = 0; y < 8; y++) {
+            verticalPixels.push('1');
+        }
+        font.components['竖'] = {
+            width: 1,
+            height: 8,
+            pixels: verticalPixels
+        };
+
+        const framePixels = [
+            '11111',
+            '10001',
+            '10001',
+            '10001',
+            '10001',
+            '11111'
+        ];
+        font.components['框'] = {
+            width: 5,
+            height: 6,
+            pixels: framePixels
         };
         
         const demoGlyphs = {
@@ -2980,9 +3804,36 @@ const PixelFontEditor = (function() {
                 width: 8,
                 height: 12,
                 pixels: pixels,
-                modified: false
+                modified: false,
+                componentRefs: []
             };
         });
+
+        if (boldOffset === 0) {
+            Object.keys(font.glyphs).forEach(cp => {
+                const g = font.glyphs[cp];
+                g.componentRefs = [];
+            });
+
+            const gE = font.glyphs[69];
+            gE.componentRefs = [
+                { componentName: '横', x: 1, y: 0 },
+                { componentName: '横', x: 1, y: 5 },
+                { componentName: '横', x: 1, y: 10 },
+                { componentName: '竖', x: 1, y: 0 }
+            ];
+            clearComponentContribution(gE);
+            rebuildGlyphFromComponents(gE);
+
+            const gH = font.glyphs[72];
+            gH.componentRefs = [
+                { componentName: '竖', x: 1, y: 1 },
+                { componentName: '竖', x: 6, y: 1 },
+                { componentName: '横', x: 1, y: 5 }
+            ];
+            clearComponentContribution(gH);
+            rebuildGlyphFromComponents(gH);
+        }
         
         return font;
     }
@@ -3643,6 +4494,97 @@ const PixelFontEditor = (function() {
                 renderPreview();
             }
         });
+
+        document.getElementById('btn-tool-pencil').onclick = () => {
+            state.currentTool = 'pencil';
+            state.selectedComponent = null;
+            state.selectionStart = null;
+            state.selectionEnd = null;
+            updateToolButtons();
+            renderGlyphCanvas();
+            renderComponentLibrary();
+        };
+        document.getElementById('btn-tool-eraser').onclick = () => {
+            state.currentTool = 'eraser';
+            state.selectedComponent = null;
+            state.selectionStart = null;
+            state.selectionEnd = null;
+            updateToolButtons();
+            renderGlyphCanvas();
+            renderComponentLibrary();
+        };
+        document.getElementById('btn-tool-line').onclick = () => {
+            state.currentTool = 'line';
+            state.selectedComponent = null;
+            state.selectionStart = null;
+            state.selectionEnd = null;
+            state.lineStart = null;
+            updateToolButtons();
+            renderGlyphCanvas();
+            renderComponentLibrary();
+        };
+        document.getElementById('btn-tool-rect').onclick = () => {
+            state.currentTool = 'rect';
+            state.selectedComponent = null;
+            state.selectionStart = null;
+            state.selectionEnd = null;
+            state.lineStart = null;
+            updateToolButtons();
+            renderGlyphCanvas();
+            renderComponentLibrary();
+        };
+        document.getElementById('btn-tool-select').onclick = () => {
+            state.currentTool = 'select';
+            state.selectedComponent = null;
+            state.selectionStart = null;
+            state.selectionEnd = null;
+            state.lineStart = null;
+            updateToolButtons();
+            renderGlyphCanvas();
+            renderComponentLibrary();
+        };
+
+        document.getElementById('btn-save-component').onclick = () => {
+            createComponentFromSelection();
+        };
+
+        canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+        });
+        canvas.addEventListener('mouseleave', () => {
+            hideComponentTooltip();
+        });
+
+        document.getElementById('btn-save-component-edit').onclick = () => saveComponentEditor();
+        document.getElementById('btn-apply-component-size').onclick = () => applyComponentEditorSize();
+        document.getElementById('btn-component-tool-pencil').onclick = () => {
+            state.componentEditorTool = 'pencil';
+            updateComponentEditorToolButtons();
+        };
+        document.getElementById('btn-component-tool-eraser').onclick = () => {
+            state.componentEditorTool = 'eraser';
+            updateComponentEditorToolButtons();
+        };
+
+        document.querySelectorAll('[data-modal-cancel]').forEach(btn => {
+            btn.onclick = (e) => {
+                const modalId = e.target.getAttribute('data-modal-cancel');
+                hideModal(modalId);
+                state.componentEditorContext = null;
+            };
+        });
+        document.querySelectorAll('[data-modal]').forEach(btn => {
+            if (!btn.classList.contains('modal-close')) return;
+            btn.onclick = (e) => {
+                const modalId = e.target.getAttribute('data-modal');
+                if (modalId) {
+                    hideModal(modalId);
+                    state.componentEditorContext = null;
+                }
+            };
+        });
+
+        setupComponentEditorEvents();
     }
 
     function init() {
@@ -3660,11 +4602,12 @@ const PixelFontEditor = (function() {
         state.currentCodePoint = 65;
         
         setupEventListeners();
+        updateToolButtons();
         renderAll();
         renderFontSelector();
         updateTabs();
         
-        document.getElementById('preview-text').value = '(font:Bold)PIXEL (font:Regular)Font Designer';
+        document.getElementById('preview-text').value = '(font:Bold)PIXEL (font:Regular)Font Designer E H';
         
         document.getElementById('effect-type').value = 'none';
         document.getElementById('wave-controls').style.display = 'none';
