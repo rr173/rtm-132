@@ -62,6 +62,7 @@ const PixelFontEditor = (function() {
         hoveredComponentRef: null,
         qualityCheckResults: null,
         qualityCheckMap: {},
+        qualityCheckOptions: null,
         showQualityAnnotations: true
     };
 
@@ -4095,7 +4096,7 @@ const PixelFontEditor = (function() {
                 } else {
                     if (runStart !== -1) {
                         const len = x - runStart;
-                        if (len >= 2) {
+                        if (len >= 1) {
                             result.horizontalStrokes.push({ y, startX: runStart, endX: x - 1, length: len });
                         }
                         runStart = -1;
@@ -4104,7 +4105,7 @@ const PixelFontEditor = (function() {
             }
             if (runStart !== -1) {
                 const len = w - runStart;
-                if (len >= 2) {
+                if (len >= 1) {
                     result.horizontalStrokes.push({ y, startX: runStart, endX: w - 1, length: len });
                 }
             }
@@ -4118,7 +4119,7 @@ const PixelFontEditor = (function() {
                 } else {
                     if (runStart !== -1) {
                         const len = y - runStart;
-                        if (len >= 2) {
+                        if (len >= 1) {
                             result.verticalStrokes.push({ x, startY: runStart, endY: y - 1, length: len });
                         }
                         runStart = -1;
@@ -4127,7 +4128,7 @@ const PixelFontEditor = (function() {
             }
             if (runStart !== -1) {
                 const len = h - runStart;
-                if (len >= 2) {
+                if (len >= 1) {
                     result.verticalStrokes.push({ x, startY: runStart, endY: h - 1, length: len });
                 }
             }
@@ -4552,7 +4553,16 @@ const PixelFontEditor = (function() {
         renderGlyphSet();
         renderPreview();
 
-        alert('已应用修正！');
+        if (state.qualityCheckOptions) {
+            const results = runQualityCheck(state.qualityCheckOptions);
+            state.qualityCheckResults = results;
+            state.qualityCheckMap = results.glyphIssues || {};
+            renderQCReport(results);
+            renderGlyphSet();
+            if (state.currentCodePoint) {
+                renderEditor();
+            }
+        }
     }
 
     function jumpToGlyph(codePoint) {
@@ -5805,6 +5815,7 @@ const PixelFontEditor = (function() {
             const results = runQualityCheck(options);
             state.qualityCheckResults = results;
             state.qualityCheckMap = results.glyphIssues || {};
+            state.qualityCheckOptions = options;
             renderQCReport(results);
             renderGlyphSet();
             if (state.currentCodePoint && state.qualityCheckMap[state.currentCodePoint]) {
