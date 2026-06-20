@@ -59,7 +59,10 @@ const PixelFontEditor = (function() {
         componentEditorContext: null,
         componentEditorTool: 'pencil',
         componentEditorIsDrawing: false,
-        hoveredComponentRef: null
+        hoveredComponentRef: null,
+        qualityCheckResults: null,
+        qualityCheckMap: {},
+        showQualityAnnotations: true
     };
 
     let previewState = {
@@ -584,6 +587,10 @@ const PixelFontEditor = (function() {
                 );
                 ctx.setLineDash([]);
             }
+        }
+
+        if (state.showQualityAnnotations) {
+            drawQCAnnotationsOnCanvas();
         }
     }
 
@@ -1979,6 +1986,29 @@ const PixelFontEditor = (function() {
                 
                 if (codePoint === state.currentCodePoint) div.classList.add('active');
                 if (isEmpty) div.classList.add('empty');
+                
+                const qcInfo = state.qualityCheckMap[codePoint];
+                if (qcInfo && qcInfo.issues && qcInfo.issues.length > 0) {
+                    div.classList.add('quality-issue');
+                    
+                    const tooltip = document.createElement('div');
+                    tooltip.className = 'charset-tooltip';
+                    const tooltipTitle = document.createElement('div');
+                    tooltipTitle.className = 'charset-tooltip-title';
+                    tooltipTitle.textContent = '⚠️ 质检问题';
+                    tooltip.appendChild(tooltipTitle);
+                    
+                    const tooltipList = document.createElement('ul');
+                    tooltipList.className = 'charset-tooltip-list';
+                    qcInfo.issues.forEach(issue => {
+                        const li = document.createElement('li');
+                        li.textContent = issue.desc;
+                        tooltipList.appendChild(li);
+                    });
+                    tooltip.appendChild(tooltipList);
+                    div.appendChild(tooltip);
+                }
+                
                 div.dataset.codePoint = codePoint;
                 
                 const canvasEl = document.createElement('canvas');
@@ -4012,6 +4042,620 @@ const PixelFontEditor = (function() {
         });
     }
 
+    function analyzeGlyph(glyph) {
+        const result = {
+            filledPixels: [],
+            horizontalStrokes: [],
+            verticalStrokes: [],
+            centroidX: 0,
+            centroidY: 0,
+            contentTop: -1,
+            contentBottom: -1,
+            contentLeft: -1,
+            contentRight: -1,
+            filledCount: 0,
+            avgHStrokeWidth: 0,
+            avgVStrokeWidth: 0,
+            density: 0
+        };
+
+        const w = glyph.width;
+        const h = glyph.height;
+
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                if (getPixel(glyph, x, y)) {
+                    result.filledPixels.push({ x, y });
+                    if (result.contentTop === -1 || y < result.contentTop) result.contentTop = y;
+                    if (result.contentBottom === -1 || y > result.contentBottom) result.contentBottom = y;
+                    if (result.contentLeft === -1 || x < result.contentLeft) result.contentLeft = x;
+                    if (result.contentRight === -1 || x > result.contentRight) result.contentRight = x;
+                }
+            }
+        }
+
+        result.filledCount = result.filledPixels.length;
+        result.density = result.filledCount / (w * h);
+
+        if (result.filledCount > 0) {
+            let sumX = 0, sumY = 0;
+            result.filledPixels.forEach(p => {
+                sumX += p.x;
+                sumY += p.y;
+            });
+            result.centroidX = sumX / result.filledCount;
+            result.centroidY = sumY / result.filledCount;
+        }
+
+        for (let y = 0; y < h; y++) {
+            let runStart = -1;
+            for (let x = 0; x < w; x++) {
+                if (getPixel(glyph, x, y)) {
+                    if (runStart === -1) runStart = x;
+                } else {
+                    if (runStart !== -1) {
+                        const len = x - runStart;
+                        if (len >= 2) {
+                            result.horizontalStrokes.push({ y, startX: runStart, endX: x - 1, length: len });
+                        }
+                        runStart = -1;
+                    }
+                }
+            }
+            if (runStart !== -1) {
+                const len = w - runStart;
+                if (len >= 2) {
+                    result.horizontalStrokes.push({ y, startX: runStart, endX: w - 1, length: len });
+                }
+            }
+        }
+
+        for (let x = 0; x < w; x++) {
+            let runStart = -1;
+            for (let y = 0; y < h; y++) {
+                if (getPixel(glyph, x, y)) {
+                    if (runStart === -1) runStart = y;
+                } else {
+                    if (runStart !== -1) {
+                        const len = y - runStart;
+                        if (len >= 2) {
+                            result.verticalStrokes.push({ x, startY: runStart, endY: y - 1, length: len });
+                        }
+                        runStart = -1;
+                    }
+                }
+            }
+            if (runStart !== -1) {
+                const len = h - runStart;
+                if (len >= 2) {
+                    result.verticalStrokes.push({ x, startY: runStart, endY: h - 1, length: len });
+                }
+            }
+        }
+
+        if (result.horizontalStrokes.length > 0) {
+            const sumH = result.horizontalStrokes.reduce((s, st) => s + st.length, 0);
+            result.avgHStrokeWidth = sumH / result.horizontalStrokes.length;
+        }
+
+        if (result.verticalStrokes.length > 0) {
+            const sumV = result.verticalStrokes.reduce((s, st) => s + st.length, 0);
+            result.avgVStrokeWidth = sumV / result.verticalStrokes.length;
+        }
+
+        return result;
+    }
+
+    function getGlyphContentHeight(analysis) {
+        if (analysis.contentTop === -1) return 0;
+        return analysis.contentBottom - analysis.contentTop + 1;
+    }
+
+    function getGlyphBottomRow(analysis) {
+        return analysis.contentBottom;
+    }
+
+    const QC_ISSUE_NAMES = {
+        stroke: '笔画宽度异常',
+        centroid: '重心偏移',
+        height: '高度不一致',
+        bottom: '底部未对齐',
+        density: '密度不均衡'
+    };
+
+    const QC_ISSUE_ICONS = {
+        stroke: '📏',
+        centroid: '🎯',
+        height: '📐',
+        bottom: '⬇️',
+        density: '⚖️'
+    };
+
+    function runQualityCheck(options) {
+        const font = getCurrentFont();
+        const nonEmptyGlyphs = [];
+        const analyses = {};
+
+        Object.keys(font.glyphs).forEach(cpStr => {
+            const cp = Number(cpStr);
+            const glyph = font.glyphs[cp];
+            if (glyph && !isGlyphEmpty(glyph)) {
+                nonEmptyGlyphs.push(cp);
+                analyses[cp] = analyzeGlyph(glyph);
+            }
+        });
+
+        const total = nonEmptyGlyphs.length;
+        if (total === 0) {
+            return { total: 0, passed: 0, issuesByType: {}, suggestions: [] };
+        }
+
+        let avgHStroke = 0, avgVStroke = 0, hCount = 0, vCount = 0;
+        let sumDensity = 0;
+        const heights = [];
+        const bottoms = [];
+
+        nonEmptyGlyphs.forEach(cp => {
+            const a = analyses[cp];
+            if (a.avgHStrokeWidth > 0) { avgHStroke += a.avgHStrokeWidth; hCount++; }
+            if (a.avgVStrokeWidth > 0) { avgVStroke += a.avgVStrokeWidth; vCount++; }
+            sumDensity += a.density;
+            heights.push(getGlyphContentHeight(a));
+            if (a.contentBottom !== -1) bottoms.push(a.contentBottom);
+        });
+
+        if (hCount > 0) avgHStroke /= hCount;
+        if (vCount > 0) avgVStroke /= vCount;
+        const avgDensity = sumDensity / total;
+        const avgHeight = heights.reduce((s, v) => s + v, 0) / heights.length;
+
+        function median(arr) {
+            if (arr.length === 0) return 0;
+            const sorted = [...arr].sort((a, b) => a - b);
+            const mid = Math.floor(sorted.length / 2);
+            return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+        }
+        const medianBottom = median(bottoms);
+
+        const strokeThreshold = (options.strokeThreshold || 30) / 100;
+        const centroidThreshold = (options.centroidThreshold || 25) / 100;
+        const heightThreshold = options.heightThreshold || 2;
+        const bottomThreshold = options.bottomThreshold || 1;
+        const densityThreshold = (options.densityThreshold || 40) / 100;
+
+        const issuesByType = {
+            stroke: [],
+            centroid: [],
+            height: [],
+            bottom: [],
+            density: []
+        };
+
+        const suggestions = [];
+        const glyphIssues = {};
+
+        nonEmptyGlyphs.forEach(cp => {
+            const a = analyses[cp];
+            const glyph = font.glyphs[cp];
+            const issuesForGlyph = [];
+
+            if (options.checkStroke) {
+                let strokeProblem = false;
+                let strokeDesc = [];
+                if (hCount > 0 && avgHStroke > 0) {
+                    const hDev = Math.abs(a.avgHStrokeWidth - avgHStroke) / avgHStroke;
+                    if (a.avgHStrokeWidth > 0 && hDev > strokeThreshold) {
+                        strokeProblem = true;
+                        const dir = a.avgHStrokeWidth > avgHStroke ? '偏粗' : '偏细';
+                        strokeDesc.push(`水平笔画${dir} ${(hDev * 100).toFixed(0)}%`);
+                    }
+                }
+                if (vCount > 0 && avgVStroke > 0) {
+                    const vDev = Math.abs(a.avgVStrokeWidth - avgVStroke) / avgVStroke;
+                    if (a.avgVStrokeWidth > 0 && vDev > strokeThreshold) {
+                        strokeProblem = true;
+                        const dir = a.avgVStrokeWidth > avgVStroke ? '偏粗' : '偏细';
+                        strokeDesc.push(`垂直笔画${dir} ${(vDev * 100).toFixed(0)}%`);
+                    }
+                }
+                if (strokeProblem) {
+                    issuesForGlyph.push({ type: 'stroke', desc: strokeDesc.join('，') });
+                    issuesByType.stroke.push({ codePoint: cp, desc: strokeDesc.join('，'), analysis: a });
+                }
+            }
+
+            if (options.checkCentroid && a.filledCount > 0) {
+                const centerX = glyph.width / 2;
+                const centerY = glyph.height / 2;
+                const devX = Math.abs(a.centroidX - centerX) / glyph.width;
+                const devY = Math.abs(a.centroidY - centerY) / glyph.height;
+                if (devX > centroidThreshold || devY > centroidThreshold) {
+                    const dirs = [];
+                    if (devX > centroidThreshold) {
+                        dirs.push(a.centroidX < centerX ? '偏左' : '偏右');
+                    }
+                    if (devY > centroidThreshold) {
+                        dirs.push(a.centroidY < centerY ? '偏上' : '偏下');
+                    }
+                    const desc = `重心${dirs.join('')} (X偏差${(devX*100).toFixed(0)}%, Y偏差${(devY*100).toFixed(0)}%)`;
+                    issuesForGlyph.push({ type: 'centroid', desc });
+                    issuesByType.centroid.push({ codePoint: cp, desc, analysis: a, glyph });
+
+                    const dx = Math.round(centerX - a.centroidX);
+                    const dy = Math.round(centerY - a.centroidY);
+                    const parts = [];
+                    if (dx !== 0) parts.push(`${dx > 0 ? '右' : '左'}移${Math.abs(dx)}像素`);
+                    if (dy !== 0) parts.push(`${dy > 0 ? '下' : '上'}移${Math.abs(dy)}像素`);
+                    if (parts.length > 0) {
+                        suggestions.push({
+                            codePoint: cp,
+                            type: 'centroid',
+                            text: `重心${dirs.join('')}，建议<span class="highlight">${parts.join('，')}</span>`,
+                            action: { dx, dy }
+                        });
+                    }
+                }
+            }
+
+            if (options.checkHeight) {
+                const contentH = getGlyphContentHeight(a);
+                if (contentH > 0 && Math.abs(contentH - avgHeight) > heightThreshold) {
+                    const dir = contentH > avgHeight ? '偏高' : '偏矮';
+                    const desc = `实际高度${dir} (${contentH}px vs 均值${avgHeight.toFixed(1)}px, 差${(contentH - avgHeight).toFixed(1)}px)`;
+                    issuesForGlyph.push({ type: 'height', desc });
+                    issuesByType.height.push({ codePoint: cp, desc, analysis: a });
+                }
+            }
+
+            if (options.checkBottom && a.contentBottom !== -1) {
+                const diff = a.contentBottom - medianBottom;
+                if (Math.abs(diff) > bottomThreshold) {
+                    const dir = diff > 0 ? `偏下${diff}px` : `偏上${-diff}px`;
+                    const desc = `底部${dir} (底部行: ${a.contentBottom} vs 中位数: ${medianBottom})`;
+                    issuesForGlyph.push({ type: 'bottom', desc });
+                    issuesByType.bottom.push({ codePoint: cp, desc, analysis: a });
+
+                    const shift = medianBottom - a.contentBottom;
+                    suggestions.push({
+                        codePoint: cp,
+                        type: 'bottom',
+                        text: `底部${dir}，建议<span class="highlight">${shift > 0 ? '下移' : '上移'}${Math.abs(shift)}像素</span>`,
+                        action: { dx: 0, dy: shift }
+                    });
+                }
+            }
+
+            if (options.checkDensity && avgDensity > 0) {
+                const dev = Math.abs(a.density - avgDensity) / avgDensity;
+                if (dev > densityThreshold) {
+                    const dir = a.density > avgDensity ? '过密' : '过疏';
+                    const desc = `密度${dir} (${(a.density*100).toFixed(1)}% vs 均值${(avgDensity*100).toFixed(1)}%, 偏差${(dev*100).toFixed(0)}%)`;
+                    issuesForGlyph.push({ type: 'density', desc });
+                    issuesByType.density.push({ codePoint: cp, desc, analysis: a });
+                }
+            }
+
+            if (issuesForGlyph.length > 0) {
+                glyphIssues[cp] = {
+                    issues: issuesForGlyph,
+                    analysis: a,
+                    glyph: cloneGlyph(glyph)
+                };
+            }
+        });
+
+        const problemCodePoints = new Set();
+        Object.values(issuesByType).forEach(list => {
+            list.forEach(item => problemCodePoints.add(item.codePoint));
+        });
+
+        const passed = total - problemCodePoints.size;
+
+        return {
+            total,
+            passed,
+            issuesByType,
+            suggestions,
+            glyphIssues,
+            stats: {
+                avgHStroke,
+                avgVStroke,
+                avgHeight,
+                medianBottom,
+                avgDensity,
+                centroidThreshold,
+                analyses
+            }
+        };
+    }
+
+    function openQualityCheckPanel() {
+        showModal('quality-check-modal');
+    }
+
+    function drawQCIssueThumbnail(canvasEl, cp) {
+        const glyph = getGlyph(cp);
+        const ctx2d = canvasEl.getContext('2d');
+        const scale = 3;
+        const width = glyph.width * scale;
+        const height = glyph.height * scale;
+        canvasEl.width = width;
+        canvasEl.height = height;
+        ctx2d.fillStyle = '#0f0f23';
+        ctx2d.fillRect(0, 0, width, height);
+        drawGlyphToCanvas(ctx2d, glyph, 0, 0, scale, '#ffffff');
+    }
+
+    function renderQCReport(results) {
+        document.getElementById('qc-stat-total').textContent = results.total;
+        document.getElementById('qc-stat-pass').textContent = results.passed;
+        const issueCount = results.total - results.passed;
+        document.getElementById('qc-stat-issues').textContent = issueCount;
+
+        document.getElementById('qc-result-section').style.display = 'block';
+        document.getElementById('qc-suggestions-section').style.display = results.suggestions.length > 0 ? 'block' : 'none';
+
+        const container = document.getElementById('qc-issues-container');
+        container.innerHTML = '';
+
+        const issueTypes = ['stroke', 'centroid', 'height', 'bottom', 'density'];
+        let hasAnyIssue = false;
+
+        issueTypes.forEach(type => {
+            const list = results.issuesByType[type];
+            if (list.length === 0) return;
+            hasAnyIssue = true;
+
+            const group = document.createElement('div');
+            group.className = 'qc-issue-group';
+            group.dataset.type = type;
+
+            const header = document.createElement('div');
+            header.className = 'qc-issue-group-header';
+            header.innerHTML = `
+                <div class="qc-issue-group-title">
+                    <span class="qc-issue-group-icon">${QC_ISSUE_ICONS[type]}</span>
+                    <span>${QC_ISSUE_NAMES[type]}</span>
+                    <span class="qc-issue-group-count">${list.length}</span>
+                </div>
+                <span class="qc-issue-group-toggle">▼</span>
+            `;
+            header.onclick = () => {
+                group.classList.toggle('collapsed');
+            };
+            group.appendChild(header);
+
+            const items = document.createElement('div');
+            items.className = 'qc-issue-group-items';
+
+            list.forEach(item => {
+                const cp = item.codePoint;
+                const char = String.fromCodePoint(cp);
+                const cpStr = 'U+' + cp.toString(16).toUpperCase().padStart(4, '0');
+
+                const itemEl = document.createElement('div');
+                itemEl.className = 'qc-issue-item';
+
+                const thumb = document.createElement('canvas');
+                thumb.className = 'qc-issue-thumbnail';
+                itemEl.appendChild(thumb);
+
+                const info = document.createElement('div');
+                info.className = 'qc-issue-info';
+                info.innerHTML = `
+                    <div>
+                        <span class="qc-issue-char">${char === ' ' ? '␣' : char}</span>
+                        <span class="qc-issue-codepoint">${cpStr}</span>
+                    </div>
+                    <div class="qc-issue-desc">${item.desc}</div>
+                `;
+                itemEl.appendChild(info);
+
+                const gotoBtn = document.createElement('button');
+                gotoBtn.className = 'qc-issue-goto';
+                gotoBtn.textContent = '编辑';
+                gotoBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    jumpToGlyph(cp);
+                };
+                itemEl.appendChild(gotoBtn);
+
+                itemEl.onclick = () => jumpToGlyph(cp);
+                items.appendChild(itemEl);
+
+                setTimeout(() => drawQCIssueThumbnail(thumb, cp), 0);
+            });
+
+            group.appendChild(items);
+            container.appendChild(group);
+        });
+
+        if (!hasAnyIssue) {
+            container.innerHTML = `
+                <div style="text-align: center; padding: 32px; color: var(--success); font-size: 15px;">
+                    ✅ 所有字形通过检测，风格统一！
+                </div>
+            `;
+        }
+
+        renderQCSuggestions(results);
+    }
+
+    function renderQCSuggestions(results) {
+        const list = document.getElementById('qc-suggestions-list');
+        list.innerHTML = '';
+
+        if (results.suggestions.length === 0) return;
+
+        results.suggestions.forEach(sug => {
+            const cp = sug.codePoint;
+            const char = String.fromCodePoint(cp);
+            const cpStr = 'U+' + cp.toString(16).toUpperCase().padStart(4, '0');
+
+            const item = document.createElement('div');
+            item.className = 'qc-suggestion-item';
+
+            const charInfo = document.createElement('div');
+            charInfo.className = 'qc-suggestion-char-info';
+            charInfo.innerHTML = `
+                <div class="qc-suggestion-char">${char === ' ' ? '␣' : char}</div>
+                <div class="qc-suggestion-codepoint">${cpStr}</div>
+            `;
+            item.appendChild(charInfo);
+
+            const text = document.createElement('div');
+            text.className = 'qc-suggestion-text';
+            text.innerHTML = sug.text;
+            item.appendChild(text);
+
+            const applyBtn = document.createElement('button');
+            applyBtn.className = 'qc-suggestion-apply';
+            applyBtn.textContent = '应用';
+            applyBtn.onclick = () => applyQCSuggestion(cp, sug);
+            item.appendChild(applyBtn);
+
+            list.appendChild(item);
+        });
+    }
+
+    function applyQCSuggestion(codePoint, suggestion) {
+        saveHistory();
+        const font = getCurrentFont();
+        const glyph = font.glyphs[codePoint];
+        if (!glyph) return;
+
+        const { dx, dy } = suggestion.action;
+
+        for (let i = 0; i < Math.abs(dx); i++) {
+            if (dx > 0) {
+                glyph.pixels = glyph.pixels.map(row => '0' + row.substring(0, glyph.width - 1));
+            } else if (dx < 0) {
+                glyph.pixels = glyph.pixels.map(row => row.substring(1) + '0');
+            }
+        }
+
+        for (let i = 0; i < Math.abs(dy); i++) {
+            if (dy > 0) {
+                glyph.pixels.pop();
+                glyph.pixels.unshift('0'.repeat(glyph.width));
+            } else if (dy < 0) {
+                glyph.pixels.shift();
+                glyph.pixels.push('0'.repeat(glyph.width));
+            }
+        }
+
+        glyph.modified = true;
+
+        if (state.currentCodePoint === codePoint) {
+            renderEditor();
+        }
+        renderGlyphSet();
+        renderPreview();
+
+        alert('已应用修正！');
+    }
+
+    function jumpToGlyph(codePoint) {
+        hideModal('quality-check-modal');
+        if (state.playbackMode) {
+            exitPlaybackMode();
+        }
+        state.currentCodePoint = codePoint;
+        state.currentTab = 'glyphs';
+        state.showQualityAnnotations = true;
+        clearHistory();
+        updateTabs();
+        renderEditor();
+        renderGlyphSet();
+        updateCurrentCharInfo();
+    }
+
+    function drawQCAnnotationsOnCanvas() {
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
+
+        const cp = state.currentCodePoint;
+        const qcInfo = state.qualityCheckMap[cp];
+        if (!qcInfo || !qcInfo.issues || qcInfo.issues.length === 0) return;
+
+        const width = glyph.width * PIXEL_SIZE;
+        const height = glyph.height * PIXEL_SIZE;
+        const analysis = qcInfo.analysis;
+
+        const hasStrokeIssue = qcInfo.issues.some(i => i.type === 'stroke');
+        const hasCentroidIssue = qcInfo.issues.some(i => i.type === 'centroid');
+
+        if (hasStrokeIssue && state.qualityCheckResults && state.qualityCheckResults.stats) {
+            const stats = state.qualityCheckResults.stats;
+            const hThresh = (document.getElementById('qc-threshold-stroke')?.value || 30) / 100;
+
+            analysis.horizontalStrokes.forEach(st => {
+                const hDev = stats.avgHStroke > 0 ? Math.abs(st.length - stats.avgHStroke) / stats.avgHStroke : 0;
+                if (hDev > hThresh) {
+                    ctx.fillStyle = st.length > stats.avgHStroke ? 'rgba(239, 68, 68, 0.35)' : 'rgba(245, 158, 11, 0.35)';
+                    ctx.fillRect(
+                        st.startX * PIXEL_SIZE,
+                        st.y * PIXEL_SIZE,
+                        (st.endX - st.startX + 1) * PIXEL_SIZE,
+                        PIXEL_SIZE
+                    );
+                }
+            });
+
+            analysis.verticalStrokes.forEach(st => {
+                const vDev = stats.avgVStroke > 0 ? Math.abs(st.length - stats.avgVStroke) / stats.avgVStroke : 0;
+                if (vDev > hThresh) {
+                    ctx.fillStyle = st.length > stats.avgVStroke ? 'rgba(239, 68, 68, 0.35)' : 'rgba(245, 158, 11, 0.35)';
+                    ctx.fillRect(
+                        st.x * PIXEL_SIZE,
+                        st.startY * PIXEL_SIZE,
+                        PIXEL_SIZE,
+                        (st.endY - st.startY + 1) * PIXEL_SIZE
+                    );
+                }
+            });
+        }
+
+        if (hasCentroidIssue) {
+            const idealCX = glyph.width / 2;
+            const idealCY = glyph.height / 2;
+
+            ctx.strokeStyle = 'rgba(34, 197, 94, 0.5)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(idealCX * PIXEL_SIZE, 0);
+            ctx.lineTo(idealCX * PIXEL_SIZE, height);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(0, idealCY * PIXEL_SIZE);
+            ctx.lineTo(width, idealCY * PIXEL_SIZE);
+            ctx.stroke();
+
+            const cx = analysis.centroidX * PIXEL_SIZE + PIXEL_SIZE / 2;
+            const cy = analysis.centroidY * PIXEL_SIZE + PIXEL_SIZE / 2;
+
+            ctx.strokeStyle = 'rgba(239, 68, 68, 0.8)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(cx - 8, cy);
+            ctx.lineTo(cx + 8, cy);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(cx, cy - 8);
+            ctx.lineTo(cx, cy + 8);
+            ctx.stroke();
+
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.9)';
+            ctx.beginPath();
+            ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.setLineDash([]);
+        }
+    }
+
     function openPreviewTransformPanel() {
         renderAllTransformPreviews();
         showModal('preview-transform-modal');
@@ -5133,6 +5777,58 @@ const PixelFontEditor = (function() {
                 const transformType = btn.dataset.transform;
                 applyTransformToCurrentGlyph(transformType);
             };
+        });
+
+        document.getElementById('btn-quality-check').onclick = () => {
+            openQualityCheckPanel();
+        };
+
+        document.getElementById('btn-start-qc').onclick = () => {
+            const options = {
+                checkStroke: document.getElementById('qc-check-stroke').checked,
+                strokeThreshold: parseFloat(document.getElementById('qc-threshold-stroke').value) || 30,
+                checkCentroid: document.getElementById('qc-check-centroid').checked,
+                centroidThreshold: parseFloat(document.getElementById('qc-threshold-centroid').value) || 25,
+                checkHeight: document.getElementById('qc-check-height').checked,
+                heightThreshold: parseFloat(document.getElementById('qc-threshold-height').value) || 2,
+                checkBottom: document.getElementById('qc-check-bottom').checked,
+                bottomThreshold: parseFloat(document.getElementById('qc-threshold-bottom').value) || 1,
+                checkDensity: document.getElementById('qc-check-density').checked,
+                densityThreshold: parseFloat(document.getElementById('qc-threshold-density').value) || 40
+            };
+
+            if (!options.checkStroke && !options.checkCentroid && !options.checkHeight && !options.checkBottom && !options.checkDensity) {
+                alert('请至少选择一个检测项！');
+                return;
+            }
+
+            const results = runQualityCheck(options);
+            state.qualityCheckResults = results;
+            state.qualityCheckMap = results.glyphIssues || {};
+            renderQCReport(results);
+            renderGlyphSet();
+            if (state.currentCodePoint && state.qualityCheckMap[state.currentCodePoint]) {
+                renderEditor();
+            }
+        };
+
+        document.getElementById('btn-clear-qc').onclick = () => {
+            state.qualityCheckResults = null;
+            state.qualityCheckMap = {};
+            document.getElementById('qc-result-section').style.display = 'none';
+            document.getElementById('qc-suggestions-section').style.display = 'none';
+            renderGlyphSet();
+            renderEditor();
+        };
+
+        document.querySelectorAll('.qc-threshold-input').forEach(input => {
+            const checkbox = input.closest('.qc-check-item').querySelector('input[type="checkbox"]');
+            if (checkbox) {
+                input.disabled = !checkbox.checked;
+                checkbox.addEventListener('change', () => {
+                    input.disabled = !checkbox.checked;
+                });
+            }
         });
 
         setupComponentEditorEvents();

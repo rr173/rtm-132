@@ -21,6 +21,7 @@
             <div class="menu-right">
                 <button id="btn-derive" class="menu-btn">派生</button>
                 <button id="btn-compare" class="menu-btn">对比</button>
+                <button id="btn-quality-check" class="menu-btn">质检</button>
                 <button id="btn-settings" class="menu-btn">设置</button>
                 <button id="btn-import" class="menu-btn">导入</button>
                 <button id="btn-export" class="menu-btn">导出 JSON</button>
@@ -560,6 +561,108 @@
             </div>
             <div class="modal-footer">
                 <button class="modal-btn secondary" data-modal-cancel="preview-transform-modal">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="quality-check-modal">
+        <div class="modal-content wide quality-check-modal">
+            <div class="modal-header">
+                <h2>🎯 字体质检</h2>
+                <button class="modal-close" data-modal="quality-check-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="qc-section">
+                    <h3 class="qc-section-title">检测选项</h3>
+                    <div class="qc-checks-grid">
+                        <div class="qc-check-item">
+                            <label class="qc-check-label">
+                                <input type="checkbox" id="qc-check-stroke" checked>
+                                <span class="qc-check-name">笔画宽度一致性</span>
+                            </label>
+                            <div class="qc-threshold-row">
+                                <label>偏差阈值:</label>
+                                <input type="number" id="qc-threshold-stroke" min="5" max="100" value="30" step="1">
+                                <span class="qc-unit">%</span>
+                            </div>
+                        </div>
+                        <div class="qc-check-item">
+                            <label class="qc-check-label">
+                                <input type="checkbox" id="qc-check-centroid" checked>
+                                <span class="qc-check-name">重心偏移</span>
+                            </label>
+                            <div class="qc-threshold-row">
+                                <label>偏差阈值:</label>
+                                <input type="number" id="qc-threshold-centroid" min="5" max="80" value="25" step="1">
+                                <span class="qc-unit">%</span>
+                            </div>
+                        </div>
+                        <div class="qc-check-item">
+                            <label class="qc-check-label">
+                                <input type="checkbox" id="qc-check-height" checked>
+                                <span class="qc-check-name">高度一致性</span>
+                            </label>
+                            <div class="qc-threshold-row">
+                                <label>偏差阈值:</label>
+                                <input type="number" id="qc-threshold-height" min="1" max="20" value="2" step="1">
+                                <span class="qc-unit">像素</span>
+                            </div>
+                        </div>
+                        <div class="qc-check-item">
+                            <label class="qc-check-label">
+                                <input type="checkbox" id="qc-check-bottom" checked>
+                                <span class="qc-check-name">底部对齐</span>
+                            </label>
+                            <div class="qc-threshold-row">
+                                <label>偏差阈值:</label>
+                                <input type="number" id="qc-threshold-bottom" min="1" max="10" value="1" step="1">
+                                <span class="qc-unit">像素</span>
+                            </div>
+                        </div>
+                        <div class="qc-check-item">
+                            <label class="qc-check-label">
+                                <input type="checkbox" id="qc-check-density" checked>
+                                <span class="qc-check-name">密度均衡</span>
+                            </label>
+                            <div class="qc-threshold-row">
+                                <label>偏差阈值:</label>
+                                <input type="number" id="qc-threshold-density" min="10" max="100" value="40" step="1">
+                                <span class="qc-unit">%</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="qc-start-row">
+                        <button id="btn-start-qc" class="modal-btn primary qc-start-btn">▶ 开始检测</button>
+                    </div>
+                </div>
+
+                <div class="qc-section" id="qc-result-section" style="display: none;">
+                    <h3 class="qc-section-title">检测报告</h3>
+                    <div class="qc-stats-bar">
+                        <div class="qc-stat-box">
+                            <div class="qc-stat-label">总字形</div>
+                            <div class="qc-stat-value" id="qc-stat-total">0</div>
+                        </div>
+                        <div class="qc-stat-box success">
+                            <div class="qc-stat-label">通过</div>
+                            <div class="qc-stat-value" id="qc-stat-pass">0</div>
+                        </div>
+                        <div class="qc-stat-box danger">
+                            <div class="qc-stat-label">问题</div>
+                            <div class="qc-stat-value" id="qc-stat-issues">0</div>
+                        </div>
+                    </div>
+                    <div id="qc-issues-container" class="qc-issues-container"></div>
+                </div>
+
+                <div class="qc-section" id="qc-suggestions-section" style="display: none;">
+                    <h3 class="qc-section-title">修正建议</h3>
+                    <div id="qc-suggestions-list" class="qc-suggestions-list"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn danger-outline" id="btn-clear-qc" style="margin-right: auto;">清除标记</button>
+                <button class="modal-btn secondary" data-modal-cancel="quality-check-modal">关闭</button>
             </div>
         </div>
     </div>
