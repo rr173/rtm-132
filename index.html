@@ -19,6 +19,7 @@
                 </div>
             </div>
             <div class="menu-right">
+                <button id="btn-derive" class="menu-btn">派生</button>
                 <button id="btn-compare" class="menu-btn">对比</button>
                 <button id="btn-settings" class="menu-btn">设置</button>
                 <button id="btn-import" class="menu-btn">导入</button>
@@ -67,6 +68,9 @@
                         <button id="btn-shift-down" class="tool-btn" title="下移">↓</button>
                         <button id="btn-shift-left" class="tool-btn" title="左移">←</button>
                         <button id="btn-shift-right" class="tool-btn" title="右移">→</button>
+                    </div>
+                    <div class="tool-group">
+                        <button id="btn-preview-transform" class="tool-btn" title="预览变换" style="width: auto; padding: 0 10px;">✨ 预览变换</button>
                     </div>
                 </div>
 
@@ -413,6 +417,152 @@
 
     <div id="component-tooltip" class="component-tooltip" style="display: none;"></div>
     <div id="component-context-menu" class="context-menu"></div>
+
+    <div class="modal-overlay" id="derive-modal">
+        <div class="modal-content wide">
+            <div class="modal-header">
+                <h2>字形派生</h2>
+                <button class="modal-close" data-modal="derive-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>源字体</label>
+                        <select id="derive-source-font" class="form-input"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>目标字体</label>
+                        <select id="derive-target-font" class="form-input"></select>
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: flex-end;">
+                        <button id="btn-new-target-font" class="small-btn" style="width: 100%;">+ 新建目标字体</button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>变换类型（可多选，按顺序执行）</label>
+                    <div class="transform-checkboxes" id="transform-checkboxes">
+                        <label class="transform-checkbox">
+                            <input type="checkbox" value="italic" data-param="italicFactor">
+                            <span class="transform-name">斜体</span>
+                            <span class="transform-param">
+                                <label>系数:</label>
+                                <input type="number" class="transform-param-input" data-param="italicFactor" min="0.1" max="0.5" step="0.05" value="0.25" disabled>
+                                <span class="param-range">(0.1-0.5)</span>
+                            </span>
+                        </label>
+                        <label class="transform-checkbox">
+                            <input type="checkbox" value="outline">
+                            <span class="transform-name">轮廓化</span>
+                        </label>
+                        <label class="transform-checkbox">
+                            <input type="checkbox" value="scale" data-param="scaleFactor">
+                            <span class="transform-name">像素缩放</span>
+                            <span class="transform-param">
+                                <label>倍数:</label>
+                                <select class="transform-param-input" data-param="scaleFactor" disabled>
+                                    <option value="2">2倍</option>
+                                    <option value="3">3倍</option>
+                                </select>
+                            </span>
+                        </label>
+                        <label class="transform-checkbox">
+                            <input type="checkbox" value="bold">
+                            <span class="transform-name">加粗</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>变换预览（当前字形应用所选变换）</label>
+                    <div class="derive-preview-container">
+                        <div class="derive-preview-item">
+                            <div class="derive-preview-label">原始</div>
+                            <canvas id="derive-preview-original" class="derive-preview-canvas"></canvas>
+                        </div>
+                        <div class="derive-preview-arrow">→</div>
+                        <div class="derive-preview-item">
+                            <div class="derive-preview-label">变换后</div>
+                            <canvas id="derive-preview-result" class="derive-preview-canvas"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="derive-override-all" style="width: auto; margin-right: 8px;">
+                        覆盖已有字形时不询问，全部覆盖
+                    </label>
+                </div>
+
+                <div class="derive-progress-container" id="derive-progress-container" style="display: none;">
+                    <div class="derive-progress-bar">
+                        <div class="derive-progress-fill" id="derive-progress-fill"></div>
+                    </div>
+                    <div class="derive-progress-text" id="derive-progress-text">0 / 0</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn secondary" data-modal-cancel="derive-modal">取消</button>
+                <button class="modal-btn primary" id="btn-execute-derive">执行派生</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="preview-transform-modal">
+        <div class="modal-content wide">
+            <div class="modal-header">
+                <h2>变换预览</h2>
+                <button class="modal-close" data-modal="preview-transform-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="transform-preview-grid">
+                    <div class="transform-preview-item" data-transform="italic">
+                        <div class="transform-preview-header">
+                            <span class="transform-preview-title">斜体</span>
+                            <div class="transform-preview-params">
+                                <label>系数:</label>
+                                <input type="number" id="preview-italic-factor" min="0.1" max="0.5" step="0.05" value="0.25">
+                            </div>
+                        </div>
+                        <canvas class="transform-preview-canvas" data-transform="italic"></canvas>
+                        <button class="transform-apply-btn" data-transform="italic">应用到当前字形</button>
+                    </div>
+                    <div class="transform-preview-item" data-transform="outline">
+                        <div class="transform-preview-header">
+                            <span class="transform-preview-title">轮廓化</span>
+                        </div>
+                        <canvas class="transform-preview-canvas" data-transform="outline"></canvas>
+                        <button class="transform-apply-btn" data-transform="outline">应用到当前字形</button>
+                    </div>
+                    <div class="transform-preview-item" data-transform="scale">
+                        <div class="transform-preview-header">
+                            <span class="transform-preview-title">像素缩放</span>
+                            <div class="transform-preview-params">
+                                <label>倍数:</label>
+                                <select id="preview-scale-factor">
+                                    <option value="2">2倍</option>
+                                    <option value="3">3倍</option>
+                                </select>
+                            </div>
+                        </div>
+                        <canvas class="transform-preview-canvas" data-transform="scale"></canvas>
+                        <button class="transform-apply-btn" data-transform="scale">应用到当前字形</button>
+                    </div>
+                    <div class="transform-preview-item" data-transform="bold">
+                        <div class="transform-preview-header">
+                            <span class="transform-preview-title">加粗</span>
+                        </div>
+                        <canvas class="transform-preview-canvas" data-transform="bold"></canvas>
+                        <button class="transform-apply-btn" data-transform="bold">应用到当前字形</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn secondary" data-modal-cancel="preview-transform-modal">关闭</button>
+            </div>
+        </div>
+    </div>
 
     <script src="app.js"></script>
 </body>

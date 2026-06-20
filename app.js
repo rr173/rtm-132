@@ -367,6 +367,14 @@ const PixelFontEditor = (function() {
         if (state.historyIndex <= 0) return;
         state.historyIndex--;
         const snapshot = state.history[state.historyIndex];
+        
+        if (snapshot.type === 'derive') {
+            undoDerive(snapshot);
+            renderAll();
+            renderFontSelector();
+            return;
+        }
+        
         const font = getCurrentFont();
         
         state.currentCodePoint = snapshot.codePoint;
@@ -3586,6 +3594,499 @@ const PixelFontEditor = (function() {
         }
     }
 
+    function transformItalic(glyph, factor) {
+        const f = Math.max(0.1, Math.min(0.5, factor || 0.25));
+        const h = glyph.height;
+        const maxOffset = Math.round((h - 0) * f);
+        const newWidth = glyph.width + maxOffset;
+        
+        const newPixels = [];
+        for (let y = 0; y < h; y++) {
+            const offset = Math.round((h - y) * f);
+            let row = '0'.repeat(offset) + glyph.pixels[y] + '0'.repeat(maxOffset - offset);
+            row = row.substring(0, newWidth);
+            while (row.length < newWidth) row += '0';
+            newPixels.push(row);
+        }
+        
+        return {
+            width: newWidth,
+            height: h,
+            pixels: newPixels,
+            modified: true
+        };
+    }
+
+    function transformOutline(glyph) {
+        const w = glyph.width;
+        const h = glyph.height;
+        const newPixels = [];
+        
+        for (let y = 0; y < h; y++) {
+            let row = '';
+            for (let x = 0; x < w; x++) {
+                if (glyph.pixels[y][x] !== '1') {
+                    row += '0';
+                    continue;
+                }
+                
+                let isEdge = false;
+                for (let dy = -1; dy <= 1 && !isEdge; dy++) {
+                    for (let dx = -1; dx <= 1 && !isEdge; dx++) {
+                        if (dx === 0 && dy === 0) continue;
+                        const nx = x + dx;
+                        const ny = y + dy;
+                        if (nx < 0 || nx >= w || ny < 0 || ny >= h) {
+                            isEdge = true;
+                        } else if (glyph.pixels[ny][nx] !== '1') {
+                            isEdge = true;
+                        }
+                    }
+                }
+                
+                row += isEdge ? '1' : '0';
+            }
+            newPixels.push(row);
+        }
+        
+        return {
+            width: w,
+            height: h,
+            pixels: newPixels,
+            modified: true
+        };
+    }
+
+    function transformScale(glyph, factor) {
+        const f = Math.max(2, Math.min(3, factor || 2));
+        const newW = glyph.width * f;
+        const newH = glyph.height * f;
+        const newPixels = [];
+        
+        for (let y = 0; y < glyph.height; y++) {
+            let scaledRow = '';
+            for (let x = 0; x < glyph.width; x++) {
+                const px = glyph.pixels[y][x];
+                scaledRow += px.repeat(f);
+            }
+            for (let i = 0; i < f; i++) {
+                newPixels.push(scaledRow);
+            }
+        }
+        
+        return {
+            width: newW,
+            height: newH,
+            pixels: newPixels,
+            modified: true
+        };
+    }
+
+    function transformBold(glyph) {
+        const w = glyph.width;
+        const h = glyph.height;
+        const newPixels = [];
+        
+        for (let y = 0; y < h; y++) {
+            let row = '';
+            for (let x = 0; x < w; x++) {
+                if (glyph.pixels[y][x] === '1' || (x > 0 && glyph.pixels[y][x - 1] === '1')) {
+                    row += '1';
+                } else {
+                    row += '0';
+                }
+            }
+            newPixels.push(row);
+        }
+        
+        return {
+            width: w,
+            height: h,
+            pixels: newPixels,
+            modified: true
+        };
+    }
+
+    function applyTransform(glyph, transformType, params) {
+        let result = {
+            width: glyph.width,
+            height: glyph.height,
+            pixels: [...glyph.pixels],
+            modified: false
+        };
+        
+        switch (transformType) {
+            case 'italic':
+                result = transformItalic(glyph, params?.italicFactor || 0.25);
+                break;
+            case 'outline':
+                result = transformOutline(glyph);
+                break;
+            case 'scale':
+                result = transformScale(glyph, params?.scaleFactor || 2);
+                break;
+            case 'bold':
+                result = transformBold(glyph);
+                break;
+        }
+        
+        return result;
+    }
+
+    function applyTransformChain(glyph, transforms) {
+        let current = {
+            width: glyph.width,
+            height: glyph.height,
+            pixels: [...glyph.pixels]
+        };
+        
+        for (const t of transforms) {
+            current = applyTransform(current, t.type, t.params);
+        }
+        
+        return current;
+    }
+
+    function drawGlyphToCanvasPreview(targetCtx, glyph, x, y, scale, color = '#ffffff') {
+        targetCtx.fillStyle = '#1a1a2e';
+        targetCtx.fillRect(x, y, glyph.width * scale, glyph.height * scale);
+        
+        targetCtx.strokeStyle = '#2a2a4a';
+        targetCtx.lineWidth = 1;
+        for (let gy = 0; gy <= glyph.height; gy++) {
+            targetCtx.beginPath();
+            targetCtx.moveTo(x, y + gy * scale + 0.5);
+            targetCtx.lineTo(x + glyph.width * scale, y + gy * scale + 0.5);
+            targetCtx.stroke();
+        }
+        for (let gx = 0; gx <= glyph.width; gx++) {
+            targetCtx.beginPath();
+            targetCtx.moveTo(x + gx * scale + 0.5, y);
+            targetCtx.lineTo(x + gx * scale + 0.5, y + glyph.height * scale);
+            targetCtx.stroke();
+        }
+        
+        targetCtx.fillStyle = color;
+        for (let gy = 0; gy < glyph.height; gy++) {
+            for (let gx = 0; gx < glyph.width; gx++) {
+                if (glyph.pixels[gy] && glyph.pixels[gy][gx] === '1') {
+                    targetCtx.fillRect(
+                        x + gx * scale,
+                        y + gy * scale,
+                        scale,
+                        scale
+                    );
+                }
+            }
+        }
+    }
+
+    function openDerivePanel() {
+        const sourceSelect = document.getElementById('derive-source-font');
+        const targetSelect = document.getElementById('derive-target-font');
+        
+        sourceSelect.innerHTML = '';
+        targetSelect.innerHTML = '';
+        
+        workspace.fonts.forEach((font, idx) => {
+            const opt1 = document.createElement('option');
+            opt1.value = idx;
+            opt1.textContent = font.metadata.name;
+            if (idx === workspace.currentFontIndex) opt1.selected = true;
+            sourceSelect.appendChild(opt1);
+            
+            const opt2 = document.createElement('option');
+            opt2.value = idx;
+            opt2.textContent = font.metadata.name;
+            targetSelect.appendChild(opt2);
+        });
+        
+        document.querySelectorAll('#transform-checkboxes input[type="checkbox"]').forEach(cb => {
+            cb.checked = false;
+            const paramInput = cb.closest('.transform-checkbox').querySelector('.transform-param-input');
+            if (paramInput) paramInput.disabled = true;
+        });
+        
+        document.getElementById('derive-override-all').checked = false;
+        document.getElementById('derive-progress-container').style.display = 'none';
+        
+        updateDerivePreview();
+        
+        showModal('derive-modal');
+    }
+
+    function updateDerivePreview() {
+        const sourceFontIdx = parseInt(document.getElementById('derive-source-font').value);
+        const sourceFont = workspace.fonts[sourceFontIdx];
+        const glyph = sourceFont.glyphs[state.currentCodePoint] || createEmptyGlyph(sourceFont.metadata.glyphWidth, sourceFont.metadata.glyphHeight);
+        
+        const transforms = getSelectedTransforms();
+        
+        const origCanvas = document.getElementById('derive-preview-original');
+        const resultCanvas = document.getElementById('derive-preview-result');
+        
+        const maxDim = Math.max(glyph.width, glyph.height, 12);
+        const scale = Math.min(16, Math.floor(120 / maxDim));
+        
+        const origCtx = origCanvas.getContext('2d');
+        origCanvas.width = glyph.width * scale;
+        origCanvas.height = glyph.height * scale;
+        drawGlyphToCanvasPreview(origCtx, glyph, 0, 0, scale);
+        
+        if (transforms.length > 0) {
+            const transformed = applyTransformChain(glyph, transforms);
+            const resultCtx = resultCanvas.getContext('2d');
+            const resultScale = Math.min(16, Math.floor(120 / Math.max(transformed.width, transformed.height)));
+            resultCanvas.width = transformed.width * resultScale;
+            resultCanvas.height = transformed.height * resultScale;
+            drawGlyphToCanvasPreview(resultCtx, transformed, 0, 0, resultScale);
+        } else {
+            const resultCtx = resultCanvas.getContext('2d');
+            resultCanvas.width = glyph.width * scale;
+            resultCanvas.height = glyph.height * scale;
+            drawGlyphToCanvasPreview(resultCtx, glyph, 0, 0, scale);
+        }
+    }
+
+    function getSelectedTransforms() {
+        const transforms = [];
+        const checkboxes = document.querySelectorAll('#transform-checkboxes input[type="checkbox"]:checked');
+        
+        checkboxes.forEach(cb => {
+            const type = cb.value;
+            const params = {};
+            const paramName = cb.dataset.param;
+            if (paramName) {
+                const paramInput = document.querySelector(`.transform-param-input[data-param="${paramName}"]`);
+                if (paramInput) {
+                    params[paramName] = parseFloat(paramInput.value);
+                }
+            }
+            transforms.push({ type, params });
+        });
+        
+        return transforms;
+    }
+
+    let deriveState = {
+        isRunning: false,
+        totalGlyphs: 0,
+        processedGlyphs: 0,
+        backups: [],
+        codePoints: [],
+        transforms: [],
+        sourceFontIdx: 0,
+        targetFontIdx: 0,
+        overrideAll: false
+    };
+
+    async function executeDerive() {
+        if (deriveState.isRunning) return;
+        
+        const transforms = getSelectedTransforms();
+        if (transforms.length === 0) {
+            alert('请至少选择一种变换类型');
+            return;
+        }
+        
+        const sourceFontIdx = parseInt(document.getElementById('derive-source-font').value);
+        const targetFontIdx = parseInt(document.getElementById('derive-target-font').value);
+        const overrideAll = document.getElementById('derive-override-all').checked;
+        
+        const sourceFont = workspace.fonts[sourceFontIdx];
+        const targetFont = workspace.fonts[targetFontIdx];
+        
+        const nonEmptyCodePoints = Object.keys(sourceFont.glyphs)
+            .map(Number)
+            .filter(cp => {
+                const g = sourceFont.glyphs[cp];
+                return g && !isGlyphEmpty(g);
+            });
+        
+        if (nonEmptyCodePoints.length === 0) {
+            alert('源字体中没有非空字形');
+            return;
+        }
+        
+        let codePointsToProcess = nonEmptyCodePoints;
+        
+        if (!overrideAll) {
+            const existingCodePoints = nonEmptyCodePoints.filter(cp => {
+                const targetGlyph = targetFont.glyphs[cp];
+                return targetGlyph && !isGlyphEmpty(targetGlyph);
+            });
+            
+            if (existingCodePoints.length > 0) {
+                const result = confirm(
+                    `目标字体中已有 ${existingCodePoints.length} 个非空字形。\n` +
+                    `点击"确定"全部覆盖，点击"取消"跳过已有字形。`
+                );
+                if (!result) {
+                    codePointsToProcess = nonEmptyCodePoints.filter(cp => !targetFont.glyphs[cp] || isGlyphEmpty(targetFont.glyphs[cp]));
+                }
+            }
+        }
+        
+        if (codePointsToProcess.length === 0) {
+            alert('没有需要处理的字形');
+            return;
+        }
+        
+        deriveState = {
+            isRunning: true,
+            totalGlyphs: codePointsToProcess.length,
+            processedGlyphs: 0,
+            backups: [],
+            codePoints: codePointsToProcess,
+            transforms: transforms,
+            sourceFontIdx: sourceFontIdx,
+            targetFontIdx: targetFontIdx,
+            overrideAll: overrideAll
+        };
+        
+        document.getElementById('btn-execute-derive').disabled = true;
+        document.getElementById('derive-progress-container').style.display = 'block';
+        
+        for (let i = 0; i < codePointsToProcess.length; i++) {
+            const cp = codePointsToProcess[i];
+            const sourceGlyph = sourceFont.glyphs[cp];
+            
+            const backup = targetFont.glyphs[cp] ? cloneGlyph(targetFont.glyphs[cp]) : null;
+            
+            const transformed = applyTransformChain(sourceGlyph, transforms);
+            
+            targetFont.glyphs[cp] = {
+                width: transformed.width,
+                height: transformed.height,
+                pixels: [...transformed.pixels],
+                modified: true,
+                componentRefs: []
+            };
+            
+            deriveState.backups.push({ codePoint: cp, backup });
+            deriveState.processedGlyphs = i + 1;
+            
+            updateDeriveProgress();
+            
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        
+        const deriveSnapshot = {
+            type: 'derive',
+            targetFontIdx: targetFontIdx,
+            backups: [...deriveState.backups]
+        };
+        
+        state.history = state.history.slice(0, state.historyIndex + 1);
+        state.history.push(deriveSnapshot);
+        if (state.history.length > MAX_HISTORY) {
+            state.history.shift();
+        } else {
+            state.historyIndex++;
+        }
+        
+        deriveState.isRunning = false;
+        document.getElementById('btn-execute-derive').disabled = false;
+        
+        renderAll();
+        renderFontSelector();
+        alert(`派生完成！共处理 ${deriveState.processedGlyphs} 个字形。`);
+    }
+
+    function updateDeriveProgress() {
+        const progress = (deriveState.processedGlyphs / deriveState.totalGlyphs) * 100;
+        document.getElementById('derive-progress-fill').style.width = progress + '%';
+        document.getElementById('derive-progress-text').textContent = 
+            `${deriveState.processedGlyphs} / ${deriveState.totalGlyphs}`;
+    }
+
+    function undoDerive(snapshot) {
+        const targetFont = workspace.fonts[snapshot.targetFontIdx];
+        
+        snapshot.backups.forEach(item => {
+            if (item.backup) {
+                targetFont.glyphs[item.codePoint] = cloneGlyph(item.backup);
+            } else {
+                delete targetFont.glyphs[item.codePoint];
+            }
+        });
+    }
+
+    function openPreviewTransformPanel() {
+        renderAllTransformPreviews();
+        showModal('preview-transform-modal');
+    }
+
+    function renderAllTransformPreviews() {
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
+        
+        const transforms = ['italic', 'outline', 'scale', 'bold'];
+        
+        transforms.forEach(type => {
+            const canvas = document.querySelector(`.transform-preview-canvas[data-transform="${type}"]`);
+            if (!canvas) return;
+            
+            const ctx = canvas.getContext('2d');
+            let params = {};
+            
+            if (type === 'italic') {
+                params.italicFactor = parseFloat(document.getElementById('preview-italic-factor').value);
+            } else if (type === 'scale') {
+                params.scaleFactor = parseInt(document.getElementById('preview-scale-factor').value);
+            }
+            
+            const transformed = applyTransform(glyph, type, params);
+            
+            const maxDim = Math.max(transformed.width, transformed.height, 12);
+            const scale = Math.min(12, Math.floor(120 / maxDim));
+            
+            canvas.width = transformed.width * scale;
+            canvas.height = transformed.height * scale;
+            drawGlyphToCanvasPreview(ctx, transformed, 0, 0, scale);
+        });
+    }
+
+    function applyTransformToCurrentGlyph(transformType) {
+        const glyph = getCurrentGlyph();
+        if (!glyph) return;
+        
+        let params = {};
+        if (transformType === 'italic') {
+            params.italicFactor = parseFloat(document.getElementById('preview-italic-factor').value);
+        } else if (transformType === 'scale') {
+            params.scaleFactor = parseInt(document.getElementById('preview-scale-factor').value);
+        }
+        
+        if (!confirm(`确定将当前字形应用${getTransformName(transformType)}变换吗？这将覆盖当前字形。`)) {
+            return;
+        }
+        
+        saveHistory();
+        
+        const transformed = applyTransform(glyph, transformType, params);
+        
+        glyph.width = transformed.width;
+        glyph.height = transformed.height;
+        glyph.pixels = [...transformed.pixels];
+        glyph.modified = true;
+        
+        hideModal('preview-transform-modal');
+        renderEditor();
+        renderGlyphSet();
+        renderPreview();
+    }
+
+    function getTransformName(type) {
+        const names = {
+            'italic': '斜体',
+            'outline': '轮廓化',
+            'scale': '像素缩放',
+            'bold': '加粗'
+        };
+        return names[type] || type;
+    }
+
     function createVariant(type) {
         if (state.playbackMode) return;
         saveHistory();
@@ -4258,12 +4759,14 @@ const PixelFontEditor = (function() {
         canvas.addEventListener('mouseup', handleCanvasMouseUp);
         canvas.addEventListener('mouseleave', handleCanvasMouseUp);
         
+        document.getElementById('btn-derive').onclick = () => openDerivePanel();
         document.getElementById('btn-settings').onclick = () => openSettings('size');
         document.getElementById('btn-export').onclick = () => exportJSON();
         document.getElementById('btn-import').onclick = () => document.getElementById('import-file').click();
         document.getElementById('btn-bdf').onclick = () => exportBDF();
         document.getElementById('btn-export-gif').onclick = () => exportGIF();
         document.getElementById('btn-compare').onclick = () => toggleCompareMode();
+        document.getElementById('btn-preview-transform').onclick = () => openPreviewTransformPanel();
         
         document.getElementById('import-file').onchange = (e) => {
             if (e.target.files[0]) {
@@ -4591,6 +5094,44 @@ const PixelFontEditor = (function() {
                     hideModal(modalId);
                     state.componentEditorContext = null;
                 }
+            };
+        });
+
+        document.querySelectorAll('#transform-checkboxes input[type="checkbox"]').forEach(cb => {
+            cb.addEventListener('change', () => {
+                const paramInput = cb.closest('.transform-checkbox').querySelector('.transform-param-input');
+                if (paramInput) {
+                    paramInput.disabled = !cb.checked;
+                }
+                updateDerivePreview();
+            });
+        });
+
+        document.querySelectorAll('.transform-param-input').forEach(input => {
+            input.addEventListener('input', () => {
+                updateDerivePreview();
+            });
+        });
+
+        document.getElementById('derive-source-font').addEventListener('change', updateDerivePreview);
+        document.getElementById('derive-target-font').addEventListener('change', () => {});
+
+        document.getElementById('btn-execute-derive').onclick = () => executeDerive();
+        document.getElementById('btn-new-target-font').onclick = () => {
+            const name = prompt('请输入新字体名称：', getCurrentFont().metadata.name + ' Variant');
+            if (name) {
+                addBlankFont(name);
+                openDerivePanel();
+            }
+        };
+
+        document.getElementById('preview-italic-factor').addEventListener('input', renderAllTransformPreviews);
+        document.getElementById('preview-scale-factor').addEventListener('change', renderAllTransformPreviews);
+
+        document.querySelectorAll('.transform-apply-btn').forEach(btn => {
+            btn.onclick = () => {
+                const transformType = btn.dataset.transform;
+                applyTransformToCurrentGlyph(transformType);
             };
         });
 
