@@ -3815,6 +3815,12 @@ const PixelFontEditor = (function() {
                 g.componentRefs = [];
             });
 
+            // Temporarily set workspace so getCurrentFont() works during demo init
+            const savedFonts = workspace.fonts;
+            const savedIndex = workspace.currentFontIndex;
+            workspace.fonts = [font];
+            workspace.currentFontIndex = 0;
+
             const gE = font.glyphs[69];
             gE.componentRefs = [
                 { componentName: '横', x: 1, y: 0 },
@@ -3833,6 +3839,10 @@ const PixelFontEditor = (function() {
             ];
             clearComponentContribution(gH);
             rebuildGlyphFromComponents(gH);
+
+            // Restore workspace
+            workspace.fonts = savedFonts;
+            workspace.currentFontIndex = savedIndex;
         }
         
         return font;
